@@ -1,6 +1,7 @@
 #include "psbridge_log.h"
 #include <debug.h>
 #include <kernel.h>
+#include <delaythread.h>
 #include <tamtypes.h>
 #include <string.h>
 #include <sifrpc.h>
@@ -8,10 +9,13 @@
 #include <stdio.h>
 #include <stdint.h>
 
+extern void *_gp;
 extern unsigned char __psbridge_heap_start[];
 extern unsigned char __psbridge_heap_end[];
 
 u32 main_kernel_work[0x400] __attribute__((aligned(16)));
+
+extern int psbridge_memory_init(void);
 
 int main(void) 
 {
@@ -35,7 +39,10 @@ int main(void)
     if (psbridge_map_game_memory() < 0)
         return -1;
 
-    psbridge_sync_init();
+    if (psbridge_sync_init() < 0 || psbridge_memory_init() < 0) {
+        PRINT_LOG("memoria nao conseguiu abrir a tranca da putaria\n");
+        return -1;
+    }
 
     PRINT_LOG("pulando pro jogo\n");
     int result = psbridge_start();

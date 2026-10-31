@@ -12,6 +12,7 @@
 #include "psbridge.h"
 #include "psbridge_log.h"
 
+
 #define PATH_SIZE 512
 #define UMD_DESCRIPTOR 0x4000
 #define UMD_HANDLES 8

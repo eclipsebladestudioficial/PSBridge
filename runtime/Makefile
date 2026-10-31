@@ -2,7 +2,7 @@ BUILD_DIR = ../build
 RUNTIME_BUILD = $(BUILD_DIR)/runtime
 MAIN_OBJ = $(RUNTIME_BUILD)/main.o
 CORE_OBJS = $(addprefix $(RUNTIME_BUILD)/core/,imports.o guest.o vfpu_entry.o)
-API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o io.o memory.o threadman.o lwmutex.o sync.o utility.o vfpu.o)
+API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o video.o io.o memory.o threadman.o lwmutex.o sync.o utility.o vfpu.o)
 VFPU_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/vfpu/,state.o memory.o operations.o)
 RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS)
 
@@ -14,10 +14,6 @@ EE_INCS += -I$(CURDIR)/include -I$(GSKIT)/include
 EE_LINKFILE = $(CURDIR)/linker/guest.ld
 EE_ASFLAGS += -I$(abspath ..)
 EE_CFLAGS += -MMD -MP
-
-ifeq ($(PSBRIDGE_HEADLESS),1)
-EE_CFLAGS += -DPSBRIDGE_HEADLESS
-endif
 
 .PHONY: all clean
 

@@ -43,137 +43,6 @@ static u64 system_time(void)
 #define LIB_STDIO 0x402828c6
 #define LIB_MPEG 0xe03657a3
 
-static u64 psbridge_video_skip(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
-{
-    static u32 seen[40];
-    static u32 calls[40];
-    static int count;
-    int i;
-    for (i = 0; i < count; i++) {
-        if (seen[i] == nid)
-            break;
-    }
-    if (i == count && count < 40) {
-        seen[count++] = nid;
-        PRINT_LOG("video foi de arrasta nid %08lx\n", (unsigned long)nid);
-    }
-    if (i < count && ++calls[i] % 20000u == 0)
-        PRINT_LOG("video ainda tentando nid %08lx chamadas %lu\n",
-            (unsigned long)nid, (unsigned long)calls[i]);
-
-    switch (nid) {
-        case 0x37295ed8: {
-            u32 *ring = psbridge_game_pointer((void *)(uintptr_t)a0);
-            if (!ring || a1 > 8192u || a1 * 2152u > a3)
-                return (u32)-1;
-            memset(ring, 0, 48);
-            ring[0] = a1;
-            ring[4] = 2048;
-            ring[5] = a2;
-            ring[6] = a4;
-            ring[7] = a5;
-            ring[8] = a2 + a1 * 2048u;
-            return 0;
-        }
-        case 0x682a619b:
-        case 0x874624d6:
-        case 0x606a4649:
-        case 0x13407f13:
-        case 0x591a4aa2:
-        case 0x707b7629:
-        case 0xceb870b1:
-        case 0x4571cc64:
-        case 0x740fccd1:
-        case 0x0e3c2e9d:
-            return 0;
-        case 0xc132e22f:
-            return 0x10000;
-        case 0xd8c5f121:
-            return 0;
-        case 0xd7a29f46:
-            return a0 > 0 && a0 < 0x8000 ? a0 * 2152u : 0;
-        case 0x21ff80e4:
-        case 0x611e9e11: {
-            const u8 *header = psbridge_game_pointer((void *)(uintptr_t)(nid == 0x21ff80e4 ? a1 : a0));
-            u32 *result = psbridge_game_pointer((void *)(uintptr_t)(nid == 0x21ff80e4 ? a2 : a1));
-            u32 offset;
-            u32 stream_size;
-            if (!header || !result || memcmp(header, "PSMF", 4))
-                return (u32)-1;
-            offset = ((u32)header[8] << 24) | ((u32)header[9] << 16) |
-                     ((u32)header[10] << 8) | header[11];
-            stream_size = ((u32)header[12] << 24) | ((u32)header[13] << 16) |
-                          ((u32)header[14] << 8) | header[15];
-            if (!offset || (offset & 2047u))
-                return (u32)-1;
-            *result = nid == 0x21ff80e4 ? offset : stream_size;
-            return 0;
-        }
-        case 0x42560f23:
-            return (a1 & 0xffu) + 1;
-        case 0xa780cf7e:
-            return 1;
-        case 0xb5f6dc87: {
-            u32 *ring = psbridge_game_pointer((void *)(uintptr_t)a0);
-            if (!ring || !ring[0] || ring[0] > 8192u)
-                return (u32)-1;
-            return ring[0];
-        }
-        case 0xb240a59e: {
-            static u32 puts;
-            u32 *ring = psbridge_game_pointer((void *)(uintptr_t)a0);
-            int result;
-            u32 call = ++puts;
-            if (call <= 12 || (call & 127u) == 0)
-                PRINT_LOG("video mamando pacotes tentativa %u pediu %u disponivel %u callback %08x\n",
-                    call, a1, a2, ring ? ring[6] : 0);
-            if (!ring || !ring[0] || ring[0] > 8192u || !ring[6])
-                return (u32)-1;
-            if (a1 > ring[0])
-                a1 = ring[0];
-            if (a1 > a2)
-                a1 = a2;
-            if (!a1)
-                return 0;
-            result = psbridge_call_callback((void *)(uintptr_t)ring[6], ring[5], a1, ring[7]);
-            if (call <= 12 || (call & 127u) == 0 || result < 0) {
-                PRINT_LOG("video callback gozou tentativa %u pacotes %d\n", call, result);
-            } else if (result == 0) {
-                static u32 secos;
-                if (++secos <= 12)
-                    PRINT_LOG("video secou os pacotes na tentativa %u\n", call);
-            }
-            if (result < 0)
-                return result;
-            if ((u32)result > a1)
-                result = (int)a1;
-            return result;
-        }
-        case 0xe1ce83a7:
-        case 0xfe246728:
-            return 0x80618001u;
-        case 0x800c44df:
-            return 0x80618001u;
-        case 0x167afd9e: {
-            u32 *au = psbridge_game_pointer((void *)(uintptr_t)a2);
-            if (au)
-                memset(au, 0, 24);
-            return 0;
-        }
-        case 0xf8dcb679: {
-            u32 *es = psbridge_game_pointer((void *)(uintptr_t)a1);
-            u32 *decoded = psbridge_game_pointer((void *)(uintptr_t)a2);
-            if (es)
-                *es = 2112;
-            if (decoded)
-                *decoded = 8192;
-            return 0;
-        }
-        default:
-            return 0x80618001u;
-    }
-}
-
 void psbridge_mixer_probe(u32 library, u32 nid, u32 callsite);
 
 u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 callsite)
@@ -300,10 +169,12 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             return psbridge_psp_thread_uid();
 
         if (import->nid == 0x092968f4)
-            return 1;
+            return psbridge_suspend_intr();
 
-        if (import->nid == 0x5f10d406)
+        if (import->nid == 0x5f10d406) {
+            psbridge_resume_intr(a0);
             return 0;
+        }
 
         if (import->nid == 0xd13bde95)
             return 0x10000;
@@ -346,7 +217,7 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
     }
 
     if (import->library == LIB_MPEG)
-        return psbridge_video_skip(import->nid, a0, a1, a2, a3, a4, a5);
+        return psbridge_video_mpeg(import->nid, a0, a1, a2, a3, a4, a5);
 
     if (import->library == LIB_AUDIO ||
         import->library == LIB_SAS ||
@@ -363,7 +234,13 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             import->nid == 0x60b81f86 ||
             import->nid == 0xc152080a
         )
-            return psbridge_controller_read((void *)a0, (int)a1);
+            return psbridge_controller_read((void *)a0, (int)a1, import->nid);
+
+        if (import->nid == 0x1f4011e6)
+            return psbridge_controller_sampling((int)a0);
+
+        if (import->nid == 0xda6b76a1)
+            return psbridge_controller_get_sampling((void *)(uintptr_t)a0);
 
         return 0;
     }
@@ -389,6 +266,9 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             return psbridge_wakeup_guest_thread((int)a0);
         if (import->nid == 0x9fa03cd3)
             return psbridge_delete_guest_thread((int)a0);
+        if (import->nid == 0x278c0df5 || import->nid == 0x840e8133)
+            return psbridge_wait_guest_thread_end((int)a0,
+                (void *)(uintptr_t)a1, import->nid == 0x840e8133);
 
         if (import->nid == 0x56c039b5)
             return psbridge_create_vpl((const char *)(uintptr_t)a0, (int)a1, a2, a3, (void *)(uintptr_t)a4);
@@ -401,6 +281,9 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
 
         if (import->nid == 0x89b3d48c)
             return psbridge_delete_vpl((int)a0);
+
+        if (import->nid == 0x39810265)
+            return psbridge_refer_vpl_status((int)a0, (void *)(uintptr_t)a1);
 
         if (import->nid == 0xa9c2cb9a)
             return psbridge_refer_mutex_status((int)a0, (void *)(uintptr_t)a1);

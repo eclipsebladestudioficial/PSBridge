@@ -5,6 +5,7 @@
 #include <timer.h>
 
 #include "psbridge.h"
+#include "psbridge_log.h"
 
 #define EVENT_LIMIT 32
 #define CALLBACK_LIMIT 32
@@ -33,6 +34,41 @@ static Callback callbacks[CALLBACK_LIMIT];
 static int next_event_uid = 0x2000;
 static int next_callback_uid = 0x1800;
 static int sync_lock = -1;
+static int intr_gate = -1;
+static volatile int intr_owner = -1;
+static volatile u32 intr_depth;
+
+u32 psbridge_suspend_intr(void)
+{
+    int current = GetThreadId();
+
+    if (intr_owner == current) {
+        intr_depth++;
+        return 0;
+    }
+
+    if (intr_gate < 0 || WaitSema(intr_gate) < 0)
+        return 1;
+
+    intr_owner = current;
+    intr_depth = 1;
+    return 1;
+}
+
+void psbridge_resume_intr(u32 flags)
+{
+    int current = GetThreadId();
+
+    if (intr_owner != current || !intr_depth)
+        return;
+
+    intr_depth--;
+    if (intr_depth || !flags)
+        return;
+
+    intr_owner = -1;
+    SignalSema(intr_gate);
+}
 
 static u64 current_time(void)
 {
@@ -54,7 +90,17 @@ int psbridge_sync_init(void)
     config.init_count = 1;
     config.max_count = 1;
     sync_lock = CreateSema(&config);
-    return sync_lock < 0 ? sync_lock : 0;
+    if (sync_lock < 0)
+        return sync_lock;
+
+    intr_gate = CreateSema(&config);
+    if (intr_gate < 0) {
+        int result = intr_gate;
+        DeleteSema(sync_lock);
+        sync_lock = -1;
+        return result;
+    }
+    return 0;
 }
 
 static EventFlag *find_event(int uid)
@@ -444,6 +490,8 @@ typedef struct {
 
 static NativePspSema psp_semas[PSP_SEMA_LIMIT];
 
+
+
 static NativePspSema *find_psp_sema(int uid)
 {
     int i;
@@ -509,15 +557,21 @@ int psbridge_delete_semaphore(int uid)
 int psbridge_signal_semaphore(int uid, int count)
 {
     NativePspSema *sema = find_psp_sema(uid);
+    int result;
+
     if (!sema || count <= 0)
         return -1;
-    WaitSema(sema->guard);
+
+    result = WaitSema(sema->guard);
+    if (result < 0)
+        return result;
+
     if (count > sema->maximum - sema->count) {
         SignalSema(sema->guard);
         return -1;
     }
+
     sema->count += count;
-    SignalSema(sema->semaphore);
     SignalSema(sema->guard);
     return 0;
 }
@@ -526,38 +580,49 @@ int psbridge_wait_semaphore(int uid, int count, void *timeout)
 {
     NativePspSema *sema = find_psp_sema(uid);
     u32 *remaining = timeout ? psbridge_game_pointer(timeout) : NULL;
-    u64 start = 0;
-    u64 duration = 0;
+    u32 limit = remaining ? *remaining : 0;
+    u64 started = current_time();
+    int warned = 0;
+
     if (!sema || count <= 0 || count > sema->maximum || (timeout && !remaining))
         return -1;
-    if (remaining) {
-        u32 seconds;
-        u32 micros;
-        TimerBusClock2USec(GetTimerSystemTime(), &seconds, &micros);
-        start = (u64)seconds * 1000000 + micros;
-        duration = *remaining;
-    }
+
     for (;;) {
+        u64 elapsed;
+        u32 delay;
+        int result;
         int available;
-        WaitSema(sema->guard);
+
+        result = WaitSema(sema->guard);
+        if (result < 0)
+            return result;
+        if (!sema->used || sema->uid != uid) {
+            SignalSema(sema->guard);
+            return -1;
+        }
         available = sema->count >= count;
         if (available)
             sema->count -= count;
         SignalSema(sema->guard);
-        if (available)
+
+        elapsed = current_time() - started;
+        if (available) {
+            if (remaining)
+                *remaining = elapsed >= limit ? 0 : limit - (u32)elapsed;
             return 0;
-        if (remaining) {
-            u32 seconds;
-            u32 micros;
-            u64 now;
-            TimerBusClock2USec(GetTimerSystemTime(), &seconds, &micros);
-            now = (u64)seconds * 1000000 + micros;
-            if (now - start >= duration) {
-                *remaining = 0;
-                return -1;
-            }
-            DelayThread(1000);
-        } else if (WaitSema(sema->semaphore) < 0)
-            return -1;
+        }
+        if (remaining && elapsed >= limit) {
+            *remaining = 0;
+            return WAIT_TIMEOUT;
+        }
+        if (!warned && elapsed >= 500000) {
+            warned = 1;
+            PRINT_LOG("sema esperando a putaria uid %d pediu %d tem %d tempo %u\n",
+                uid, count, sema->count, (u32)elapsed);
+        }
+        delay = remaining ? limit - (u32)elapsed : 1000;
+        if (delay > 1000)
+            delay = 1000;
+        DelayThread(delay ? delay : 1);
     }
 }

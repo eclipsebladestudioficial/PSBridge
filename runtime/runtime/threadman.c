@@ -50,9 +50,109 @@ extern int psbridge_call_thread(
     void *kernel_work
 );
 
+typedef struct {
+    int uid;
+    int status;
+} FinishedPspThread;
+
+#define FINISHED_THREAD_LIMIT 128
+
 static PspThread threads[THREAD_LIMIT];
+static FinishedPspThread finished_threads[FINISHED_THREAD_LIMIT];
+static u32 finished_thread_count;
+static int next_thread_uid = 0x100;
 static PspMailbox mailboxes[MAILBOX_LIMIT];
 static int next_mailbox_uid = 0x3000;
+
+static PspThread *find_thread(int uid);
+
+
+static void finish_guest_thread(int uid, int status)
+{
+    FinishedPspThread *finished = &finished_threads[
+        finished_thread_count % FINISHED_THREAD_LIMIT
+    ];
+
+    finished->uid = uid;
+    finished->status = status;
+    finished_thread_count++;
+}
+
+static int finished_guest_thread(int uid, int *status)
+{
+    u32 index;
+
+    for (index = 0; index < FINISHED_THREAD_LIMIT; index++) {
+        if (finished_threads[index].uid == uid) {
+            *status = finished_threads[index].status;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static u64 guest_thread_time(void)
+{
+    u32 seconds;
+    u32 microseconds;
+
+    TimerBusClock2USec(GetTimerSystemTime(), &seconds, &microseconds);
+    return (u64)seconds * 1000000 + microseconds;
+}
+
+int psbridge_wait_guest_thread_end(int uid, void *timeout, int use_callbacks)
+{
+    u32 *remaining = timeout ? psbridge_game_pointer(timeout) : NULL;
+    u32 limit = remaining ? *remaining : 0;
+    u64 started = guest_thread_time();
+    int warned = 0;
+    int status;
+
+    if ((timeout && !remaining) || uid == psbridge_psp_thread_uid())
+        return -1;
+
+    for (;;) {
+        PspThread *thread = find_thread(uid);
+        u64 elapsed;
+
+        if (!thread) {
+            if (!finished_guest_thread(uid, &status))
+                return -1;
+
+            elapsed = guest_thread_time() - started;
+            if (remaining)
+                *remaining = elapsed >= limit ? 0 : limit - (u32)elapsed;
+            {
+                static u32 logs;
+                if (logs++ < 32)
+                    PRINT_LOG("thread esperou a putaria uid %d retorno %d tempo %u\n",
+                        uid, status, (u32)elapsed);
+            }
+            return status;
+        }
+
+        elapsed = guest_thread_time() - started;
+        if (remaining && elapsed >= limit) {
+            *remaining = 0;
+            return (int)0x800201a8u;
+        }
+
+        if (!warned && elapsed >= 500000) {
+            warned = 1;
+            PRINT_LOG("thread ainda ta esperando a putaria uid %d ee %d tempo %u\n",
+                uid, thread->thread_id, (u32)elapsed);
+        }
+
+        if (use_callbacks)
+            psbridge_check_callbacks();
+
+        if (remaining && limit - (u32)elapsed < 1000)
+            DelayThread(limit - (u32)elapsed ? limit - (u32)elapsed : 1);
+        else
+            DelayThread(1000);
+    }
+}
 
 static PspThread *find_thread(int uid)
 {
@@ -91,12 +191,18 @@ static void run_thread(void *arg)
     kernel_work[0xfc / 4] = 0xffffffff;
     initial_stack[0] = thread->uid;
 
-    psbridge_call_thread(
-        thread->entry,
-        thread->arg_size,
-        thread->arg,
-        thread->kernel_work
-    );
+    {
+        int result = psbridge_call_thread(
+            thread->entry,
+            thread->arg_size,
+            thread->arg,
+            thread->kernel_work
+        );
+        static unsigned logs;
+        if (logs++ < 32)
+            PRINT_LOG("thread %d terminou a putaria retorno %d\n", thread->uid, result);
+        finish_guest_thread(thread->uid, result);
+    }
 
     thread->used = 0;
     ExitDeleteThread();
@@ -158,7 +264,7 @@ int psbridge_create_thread(const char *name, void *entry, int priority, int stac
             return thread_id;
 
         threads[index].used = 1;
-        threads[index].uid = 0x100 + index;
+        threads[index].uid = next_thread_uid++;
         threads[index].thread_id = thread_id;
         threads[index].entry = entry;
         threads[index].stack_size = needed;
@@ -512,6 +618,10 @@ void psbridge_exit_guest_thread(int status)
     (void)status;
     for (index = 0; index < THREAD_LIMIT; index++) {
         if (threads[index].used && threads[index].thread_id == caller) {
+            static unsigned logs;
+            if (logs++ < 32)
+                PRINT_LOG("thread %d vazou da putaria resultado %d\n", threads[index].uid, status);
+            finish_guest_thread(threads[index].uid, status);
             threads[index].used = 0;
             break;
         }

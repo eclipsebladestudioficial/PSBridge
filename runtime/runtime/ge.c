@@ -140,11 +140,6 @@ typedef struct {
 
 static GeCallback ge_callbacks[16];
 static u32 diag_ge_callbacks;
-static u32 diag_ge_last_fb;
-static u32 diag_ge_last_texture;
-static u32 diag_ge_last_prim;
-static u32 diag_ge_last_format;
-static u32 diag_ge_trace_count;
 static volatile u32 ge_ready_buffer;
 static volatile u32 ge_ready_sequence;
 
@@ -158,7 +153,6 @@ u32 psbridge_ge_ready_sequence(void)
     return ge_ready_sequence;
 }
 
-volatile int psbridge_diag_on __attribute__((weak));
 
 static GeCallback *find_ge_callback(int id)
 {
@@ -210,39 +204,7 @@ static void fire_ge_callback(int callback_id, int finish, u32 data)
             finish ? "fim" : "sinal", callback_id, data, function, diag_ge_callbacks);
     psbridge_call_callback((void *)(uintptr_t)function, data, argument, 0);
 }
-static u32 diag_ge_lists;
-static u32 diag_ge_commands;
-static u32 diag_ge_prims;
-static u32 diag_ge_transfers;
-static u32 diag_ge_stalls;
-static u32 diag_ge_fails;
-static u32 diag_ge_last_pc;
-static u32 diag_ge_last_stall;
-static u32 diag_ge_last_word;
 
-void psbridge_diag_ge(void)
-{
-    int i;
-    int waiting = 0;
-    int finished = 0;
-
-    for (i = 0; i < GE_LIST_LIMIT; i++) {
-        if (!lists[i].used)
-            continue;
-        if (lists[i].done)
-            finished++;
-        else
-            waiting++;
-    }
-
-    PRINT_LOG("vigia farejou GE listas %u instrucoes %u primitivos %u copias %u engasgos %u falhas %u esperando %d finalizadas %d pc %08x stall %08x ultima %08x\n",
-        diag_ge_lists, diag_ge_commands, diag_ge_prims, diag_ge_transfers,
-        diag_ge_stalls, diag_ge_fails, waiting, finished,
-        diag_ge_last_pc, diag_ge_last_stall, diag_ge_last_word);
-    PRINT_LOG("vigia GE pintou alvo %08x textura %08x primitivo %08x formato %u callbacks %u\n",
-        diag_ge_last_fb, diag_ge_last_texture, diag_ge_last_prim,
-        diag_ge_last_format, diag_ge_callbacks);
-}
 
 
 
@@ -2048,8 +2010,6 @@ static void execute_list(GeList *list)
         }
 
         word = *instruction;
-        diag_ge_last_pc = list->pc - 4;
-        diag_ge_last_word = word;
         command = word >> 24;
         argument = word & 0x00ffffff;
         list->pc += 4;
@@ -2085,20 +2045,8 @@ static void execute_list(GeList *list)
             state.offset_address = list->pc - 4;
         else if (command == GE_PRIM) {
             list->draws++;
-            diag_ge_prims++;
-            diag_ge_last_prim = argument;
-            diag_ge_last_fb = buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH);
-            diag_ge_last_texture = buffer_address(GE_TEXADDR0, GE_TEXBUFWIDTH0);
-            diag_ge_last_format = state.command[GE_FRAMEBUF_FORMAT] & 3;
-            if (psbridge_diag_on && diag_ge_trace_count < 64) {
-                diag_ge_trace_count++;
-                PRINT_LOG("ge vai pintar a frica alvo %08x textura %08x tipo %08x formato %u comando %08x\n",
-                    diag_ge_last_fb, diag_ge_last_texture, argument,
-                    diag_ge_last_format, diag_ge_last_pc);
-            }
             draw_primitive(argument);
         } else if (command == GE_TRANSFERSTART) {
-            diag_ge_transfers++;
             transfer_pixels();
         }
         else if (command == GE_LOADCLUT)
@@ -2141,13 +2089,7 @@ static void execute_list(GeList *list)
             }
         }
     }
-
-    diag_ge_commands += commands;
-    diag_ge_last_stall = list->stall;
-    if (list->stall && list->pc == list->stall && !list->done)
-        diag_ge_stalls++;
     if (commands >= GE_COMMAND_LIMIT) {
-        diag_ge_fails++;
         list->done = 1;
     }
 }
@@ -2171,11 +2113,8 @@ static int enqueue_list(u32 address, u32 stall, int callback_id)
     }
 
     if (!list) {
-        diag_ge_fails++;
         return -1;
     }
-
-    diag_ge_lists++;
     memset(list, 0, sizeof(*list));
     list->used = 1;
     list->id = next_list_id++;
