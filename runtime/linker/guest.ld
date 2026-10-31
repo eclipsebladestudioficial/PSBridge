@@ -93,7 +93,7 @@ SECTIONS {
         __psbridge_heap_start = .;
         . += 4;
     } :text
-    .psbridge_heap_limit 0x81b00000 (NOLOAD) : AT(ADDR(.psbridge_heap_limit) - 0x80000000) {
+    .psbridge_heap_limit 0x81f00000 (NOLOAD) : AT(ADDR(.psbridge_heap_limit) - 0x80000000) {
         __psbridge_heap_end = .;
         . += 4;
         _end = . - 0x80000000;
