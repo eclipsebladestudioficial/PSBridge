@@ -4,7 +4,8 @@ MAIN_OBJ = $(RUNTIME_BUILD)/main.o
 CORE_OBJS = $(addprefix $(RUNTIME_BUILD)/core/,imports.o guest.o vfpu_entry.o)
 API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o video.o io.o memory.o threadman.o lwmutex.o sync.o utility.o vfpu.o)
 VFPU_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/vfpu/,state.o memory.o operations.o)
-RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS)
+GE_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/ge/,list.o vertex.o texture.o raster.o)
+RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS) $(GE_OBJS)
 
 EE_BIN = $(BUILD_DIR)/PSBridge-debug.elf
 STRIPPED_BIN = $(BUILD_DIR)/PSBridge-stripped.elf
@@ -54,6 +55,10 @@ $(RUNTIME_BUILD)/runtime/%.o: runtime/%.c
 	$(EE_CC) $(EE_CFLAGS) $(EE_INCS) -c $< -o $@
 
 $(RUNTIME_BUILD)/runtime/vfpu/%.o: runtime/vfpu/%.c
+	$(DIR_GUARD)
+	$(EE_CC) $(EE_CFLAGS) $(EE_INCS) -c $< -o $@
+
+$(RUNTIME_BUILD)/runtime/ge/%.o: runtime/ge/%.c
 	$(DIR_GUARD)
 	$(EE_CC) $(EE_CFLAGS) $(EE_INCS) -c $< -o $@
 
