@@ -266,10 +266,62 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
         vfpu_finish_prefix();
         return;
     }
+    if ((op & 0xffe00000) == 0xd0600000)
+    {
+        static const float values[32] = {
+            0.0f, 3.402823466e38f, 1.4142135623730951f, 0.7071067811865476f,
+            1.1283791670955126f, 0.6366197723675813f, 0.3183098861837907f,
+            0.7853981633974483f, 1.5707963267948966f, 3.1415926535897932f,
+            2.7182818284590452f, 1.4426950408889634f, 0.4342944819032518f,
+            0.6931471805599453f, 2.3025850929940457f, 6.2831853071795865f,
+            0.5235987755982989f, 0.3010299956639812f, 3.3219280948873623f,
+            0.8660254037844386f
+        };
+        float c = values[(op >> 16) & 31];
+        for (i = 0; i < size; i++)
+            d[i] = c;
+        vfpu_write_vector(vd, size, d, 1);
+        vfpu_finish_prefix();
+        return;
+    }
     if ((op & 0xff000000) == 0xd0000000)
     {
         int kind = (op >> 16) & 255;
         vfpu_read_prefix(vs, size, s, vfpu_prefix_s, vfpu_have_s);
+        if (kind == 66 || kind == 67)
+        {
+            vfpu_read_vector(vs, size, s);
+            if (kind == 66 && (size == 2 || size == 4))
+            {
+                for (i = 0; i < size; i += 2)
+                {
+                    d[i] = s[i] + s[i + 1];
+                    d[i + 1] = s[i] - s[i + 1];
+                }
+            }
+            else if (kind == 67 && size == 4)
+            {
+                d[0] = s[0] + s[2];
+                d[1] = s[1] + s[3];
+                d[2] = s[0] - s[2];
+                d[3] = s[1] - s[3];
+            }
+            else
+                goto unknown;
+            vfpu_write_vector(vd, size, d, 1);
+            vfpu_finish_prefix();
+            return;
+        }
+        if (kind == 70 || kind == 71)
+        {
+            float total = 0.0f;
+            for (i = 0; i < size; i++)
+                total += s[i];
+            d[0] = kind == 71 ? total / (float)size : total;
+            vfpu_write_vector(vd, 1, d, 1);
+            vfpu_finish_prefix();
+            return;
+        }
         for (i = 0; i < size; i++)
         {
             float v = s[i];
@@ -291,7 +343,7 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
                 d[i] = fminf(1, fmaxf(-1, v));
                 break;
             case 3:
-                d[i] = ((vd >> 5) & 3) == i ? 1 : 0;
+                d[i] = (vd & (size - 1)) == i ? 1 : 0;
                 break;
             case 6:
                 d[i] = 0;
@@ -401,23 +453,69 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
         vfpu_finish_prefix();
         return;
     }
+    if ((op & 0xff800000) == 0xf2800000 && (size == 3 || size == 4))
+    {
+        vfpu_read_vector(vs, size, s);
+        vfpu_read_vector(vt, size, t);
+        if (size == 3)
+        {
+            d[0] = s[1] * t[2] - s[2] * t[1];
+            d[1] = s[2] * t[0] - s[0] * t[2];
+            d[2] = s[0] * t[1] - s[1] * t[0];
+        }
+        else
+        {
+            d[0] = s[3] * t[0] - s[2] * t[1] + s[1] * t[2] + s[0] * t[3];
+            d[1] = s[3] * t[1] + s[2] * t[0] + s[1] * t[3] - s[0] * t[2];
+            d[2] = s[3] * t[2] + s[2] * t[3] - s[1] * t[0] + s[0] * t[1];
+            d[3] = s[3] * t[3] - s[2] * t[2] - s[1] * t[1] - s[0] * t[0];
+        }
+        vfpu_write_vector(vd, size, d, 1);
+        vfpu_finish_prefix();
+        return;
+    }
     if ((op & 0xff000000) == 0xf0000000 || (op & 0xff000000) == 0xf1000000 ||
         (op & 0xff000000) == 0xf2000000 || (op & 0xff000000) == 0xf3000000)
     {
         float a[4][4] = {{0}}, b[4][4] = {{0}}, o[4][4] = {{0}};
         int subtype = (op >> 23) & 7;
+        if ((op & 0xffe00000) == 0xf3a00000)
+        {
+            int imm = (op >> 16) & 31;
+            int sin_lane = (imm >> 2) & 3;
+            int cos_lane = imm & 3;
+            float angle[4] = {0};
+            float si, co;
+            vfpu_read_prefix(vs, 1, angle, vfpu_prefix_s, vfpu_have_s);
+            si = sinf(angle[0] * 1.5707963267948966f);
+            co = cosf(angle[0] * 1.5707963267948966f);
+            if (imm & 16)
+                si = -si;
+            for (i = 0; i < size; i++)
+                d[i] = (sin_lane == cos_lane || i == sin_lane) ? si : 0.0f;
+            if (cos_lane < size)
+                d[cos_lane] = co;
+            vfpu_write_vector(vd, size, d, 1);
+            vfpu_finish_prefix();
+            return;
+        }
         if ((op & 0xff800000) == 0xf0800000 || (op & 0xff800000) == 0xf1000000 ||
             (op & 0xff800000) == 0xf1800000)
         {
-            int n = size, homogeneous = (subtype == size - 1);
+            int n = size;
+            int homogeneous = n == subtype;
             float input[4] = {0};
+            if (homogeneous)
+                n++;
+            else if (n != subtype + 1)
+                goto unknown;
             vfpu_matrix_read(vs, n, a);
             vfpu_read_vector(vt, n, input);
             for (i = 0; i < n; i++)
             {
                 float accum = 0;
                 for (k = 0; k < n; k++)
-                    accum += a[k][i] * (homogeneous && k == n - 1 ? 1 : input[k]);
+                    accum += a[i][k] * (homogeneous && k == n - 1 ? 1 : input[k]);
                 d[i] = accum;
             }
             vfpu_write_vector(vd, n, d, 1);
@@ -431,7 +529,7 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
             for (j = 0; j < size; j++)
                 for (i = 0; i < size; i++)
                     for (k = 0; k < size; k++)
-                        o[j][i] += a[k][i] * b[j][k];
+                        o[j][i] += a[i][k] * b[j][k];
             vfpu_matrix_write(vd, size, o);
             vfpu_finish_prefix();
             return;

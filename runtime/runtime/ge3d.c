@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include "ge3d.h"
+#include "psbridge_log.h"
 
 #define GE_WORLDMATRIXNUMBER 0x3a
 #define GE_WORLDMATRIXDATA 0x3b
@@ -10,8 +11,10 @@
 #define GE_PROJMATRIXDATA 0x3f
 #define GE_VIEWPORTXSCALE 0x42
 #define GE_VIEWPORTYSCALE 0x43
+#define GE_VIEWPORTZSCALE 0x44
 #define GE_VIEWPORTXCENTER 0x45
 #define GE_VIEWPORTYCENTER 0x46
+#define GE_VIEWPORTZCENTER 0x47
 #define GE_TEXSCALEU 0x48
 #define GE_TEXSCALEV 0x49
 #define GE_TEXOFFSETU 0x4a
@@ -26,6 +29,26 @@ static float ge_projection[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
 static u32 ge_world_index;
 static u32 ge_view_index;
 static u32 ge_projection_index;
+
+void ge3d_log_matrices(void)
+{
+    static int logged;
+    int i;
+
+    if (logged)
+        return;
+    logged = 1;
+    for (i = 0; i < 12; i += 3)
+        PRINT_3D_LOG("matriz world meteu linha %d %.6f %.6f %.6f\n", i / 3,
+            ge_world[i], ge_world[i + 1], ge_world[i + 2]);
+    for (i = 0; i < 12; i += 3)
+        PRINT_3D_LOG("matriz view meteu linha %d %.6f %.6f %.6f\n", i / 3,
+            ge_view[i], ge_view[i + 1], ge_view[i + 2]);
+    for (i = 0; i < 16; i += 4)
+        PRINT_3D_LOG("matriz proj meteu linha %d %.6f %.6f %.6f %.6f\n", i / 4,
+            ge_projection[i], ge_projection[i + 1],
+            ge_projection[i + 2], ge_projection[i + 3]);
+}
 
 static void ge3d_skinning_command(u32 command, u32 value)
 {
@@ -167,13 +190,41 @@ void ge3d_command(u32 command, u32 value)
         ge3d_fog_command(command, value);
 }
 
+int ge3d_project_vertex(GeVertex *v, const u32 *commands)
+{
+    float sx = ge3d_float(commands[GE_VIEWPORTXSCALE]);
+    float sy = ge3d_float(commands[GE_VIEWPORTYSCALE]);
+    float sz = ge3d_float(commands[GE_VIEWPORTZSCALE]);
+    float ox = ge3d_float(commands[GE_VIEWPORTXCENTER]);
+    float oy = ge3d_float(commands[GE_VIEWPORTYCENTER]);
+    float oz = ge3d_float(commands[GE_VIEWPORTZCENTER]);
+
+    if (v->clip_w == 0.0f)
+        return 0;
+
+    v->inv_w = 1.0f / v->clip_w;
+    v->x = v->clip_x * v->inv_w * sx + ox -
+        (float)(commands[GE_OFFSETX] & 0xffff) * (1.0f / 16.0f);
+    v->y = v->clip_y * v->inv_w * sy + oy -
+        (float)(commands[GE_OFFSETY] & 0xffff) * (1.0f / 16.0f);
+    v->z = v->clip_z * v->inv_w * sz + oz;
+
+    return v->x > -10000.0f && v->x < 10000.0f &&
+        v->y > -10000.0f && v->y < 10000.0f;
+}
+
 void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
 {
-    float x, y, z, wx, wy, wz, vx, vy, vz, cx, cy, cw;
-    float sx, sy, ox, oy;
+    float x, y, z, wx, wy, wz, vx, vy, vz;
 
-    if (type & (1u << 23))
+    if (type & (1u << 23)) {
+        v->clip_x = v->x;
+        v->clip_y = v->y;
+        v->clip_z = v->z;
+        v->clip_w = 1.0f;
+        v->inv_w = 1.0f;
         return;
+    }
 
     x = v->x;
     y = v->y;
@@ -197,28 +248,10 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
     vy = wx * ge_view[1] + wy * ge_view[4] + wz * ge_view[7] + ge_view[10];
     vz = wx * ge_view[2] + wy * ge_view[5] + wz * ge_view[8] + ge_view[11];
 
-    cx = vx * ge_projection[0] + vy * ge_projection[4] + vz * ge_projection[8] + ge_projection[12];
-    cy = vx * ge_projection[1] + vy * ge_projection[5] + vz * ge_projection[9] + ge_projection[13];
-    cw = vx * ge_projection[3] + vy * ge_projection[7] + vz * ge_projection[11] + ge_projection[15];
-
-    if (!(cw > 0.00001f)) {
-        v->x = -100000.0f;
-        v->y = -100000.0f;
-        return;
-    }
-
-    sx = ge3d_float(commands[GE_VIEWPORTXSCALE]);
-    sy = ge3d_float(commands[GE_VIEWPORTYSCALE]);
-    ox = ge3d_float(commands[GE_VIEWPORTXCENTER]);
-    oy = ge3d_float(commands[GE_VIEWPORTYCENTER]);
-
-    v->x = cx / cw * sx + ox - (float)(commands[GE_OFFSETX] & 0xffff) * (1.0f / 16.0f);
-    v->y = cy / cw * sy + oy - (float)(commands[GE_OFFSETY] & 0xffff) * (1.0f / 16.0f);
-
-    if (!(v->x > -10000 && v->x < 10000 && v->y > -10000 && v->y < 10000)) {
-        v->x = -100000.0f;
-        v->y = -100000.0f;
-    }
+    v->clip_x = vx * ge_projection[0] + vy * ge_projection[4] + vz * ge_projection[8] + ge_projection[12];
+    v->clip_y = vx * ge_projection[1] + vy * ge_projection[5] + vz * ge_projection[9] + ge_projection[13];
+    v->clip_z = vx * ge_projection[2] + vy * ge_projection[6] + vz * ge_projection[10] + ge_projection[14];
+    v->clip_w = vx * ge_projection[3] + vy * ge_projection[7] + vz * ge_projection[11] + ge_projection[15];
 
     if ((type & 3) != 0) {
         float tu = ge3d_float(commands[GE_TEXSCALEU]);
@@ -241,5 +274,10 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
         v->v = v->v * tv + ge3d_float(commands[GE_TEXOFFSETV]);
         v->u *= (float)(1 << (commands[GE_TEXSIZE0] & 0xf));
         v->v *= (float)(1 << ((commands[GE_TEXSIZE0] >> 8) & 0xf));
+    }
+
+    if (!ge3d_project_vertex(v, commands)) {
+        v->x = -100000.0f;
+        v->y = -100000.0f;
     }
 }

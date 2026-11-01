@@ -12,9 +12,10 @@ static inline void psbridge_print_log(const char *format, ...)
     va_end(args);
 }
 
-#define PRINT_LOG(...) psbridge_print_log(__VA_ARGS__)
+#define PRINT_LOG(...) do { } while (0)
+#define PRINT_3D_LOG(...) psbridge_print_log(__VA_ARGS__)
 
-#define PSB_LOG_MASTER 1
+#define PSB_LOG_MASTER 0
 #define PSB_LOG_IMPORT 0
 #define PSB_LOG_IO 0
 #define PSB_LOG_THREAD 1

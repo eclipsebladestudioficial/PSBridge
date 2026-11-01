@@ -2,7 +2,7 @@
 
 #include "ge_internal.h"
 
-static void draw_pixel(int x, int y, u32 color)
+static void draw_pixel_internal(int x, int y, u32 color, float depth, int use_depth)
 {
     int width = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
     int format = ge_state.command[GE_FRAMEBUF_FORMAT] & 3;
@@ -14,6 +14,9 @@ static void draw_pixel(int x, int y, u32 color)
     int index;
     u32 alpha_command;
     u32 destination;
+    u16 *depth_buffer = NULL;
+    int depth_width = 0;
+    u16 depth_value = 0;
 
     if (!frame || width < 64 || width > 2048)
         return;
@@ -29,6 +32,20 @@ static void draw_pixel(int x, int y, u32 color)
     if (x < 0 || y < 0 || x >= width || y >= 512)
         return;
 
+    if (use_depth) {
+        if (depth < 0.0f)
+            depth = 0.0f;
+        if (depth > 65535.0f)
+            depth = 65535.0f;
+        depth_value = (u16)(u32)depth;
+        depth_width = ge_state.command[GE_DEPTHBUF_WIDTH] & 0x7fc;
+        depth_buffer = ge_pointer(buffer_address(
+            GE_DEPTHBUF_BASE, GE_DEPTHBUF_WIDTH
+        ));
+        if (depth_width < 64 || depth_width > 2048)
+            depth_buffer = NULL;
+    }
+
     if ((ge_state.command[GE_ALPHA_TEST_ENABLE] & 1) && !(ge_state.command[GE_CLEARMODE] & 1)) {
         alpha_command = ge_state.command[GE_ALPHATEST];
 
@@ -39,6 +56,15 @@ static void draw_pixel(int x, int y, u32 color)
         ))
             return;
     }
+
+    if (depth_buffer && !(ge_state.command[GE_CLEARMODE] & 1) &&
+        (ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) &&
+        !compare_alpha(
+            ge_state.command[GE_DEPTHTEST] & 7,
+            depth_value,
+            depth_buffer[y * depth_width + x]
+        ))
+        return;
 
     index = y * width + x;
 
@@ -58,6 +84,19 @@ static void draw_pixel(int x, int y, u32 color)
     }
 
     write_frame_pixel(frame, index, format, color);
+
+    if (depth_buffer) {
+        if (ge_state.command[GE_CLEARMODE] & 0x400)
+            depth_buffer[y * depth_width + x] = depth_value;
+        else if (!(ge_state.command[GE_CLEARMODE] & 1) &&
+            !(ge_state.command[GE_DEPTH_WRITE_DISABLE] & 1))
+            depth_buffer[y * depth_width + x] = depth_value;
+    }
+}
+
+static void draw_pixel(int x, int y, u32 color)
+{
+    draw_pixel_internal(x, y, color, 0.0f, 0);
 }
 
 static int fast_sprite_target(
@@ -190,6 +229,43 @@ static int draw_solid_sprite(
     }
 
     return 1;
+}
+
+static void clear_depth_sprite(
+    GeVertex second,
+    int left,
+    int top,
+    int right,
+    int bottom
+)
+{
+    void *frame;
+    u16 *depth;
+    int frame_width;
+    int depth_width;
+    int x;
+    int y;
+    u16 value;
+
+    if (!(ge_state.command[GE_CLEARMODE] & 0x400))
+        return;
+
+    if (!fast_sprite_target(&left, &top, &right, &bottom, &frame, &frame_width))
+        return;
+
+    depth_width = ge_state.command[GE_DEPTHBUF_WIDTH] & 0x7fc;
+    depth = ge_pointer(buffer_address(GE_DEPTHBUF_BASE, GE_DEPTHBUF_WIDTH));
+    if (!depth || depth_width < 64 || depth_width > 2048)
+        return;
+
+    if (right > depth_width)
+        right = depth_width;
+    value = second.z < 0.0f ? 0 :
+        second.z > 65535.0f ? 65535 : (u16)(u32)second.z;
+
+    for (y = top; y < bottom; y++)
+        for (x = left; x < right; x++)
+            depth[y * depth_width + x] = value;
 }
 
 static int draw_rgba5551_sprite(
@@ -684,6 +760,8 @@ static void draw_sprite(GeVertex first, GeVertex second)
     int top = (int)(first.y < second.y ? first.y : second.y);
     int right = (int)(first.x > second.x ? first.x : second.x);
     int bottom = (int)(first.y > second.y ? first.y : second.y);
+
+    clear_depth_sprite(second, left, top, right, bottom);
     int u_start;
     int v_start;
     int texture_on;
@@ -835,18 +913,24 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     float alpha_row;
     float u_row;
     float v_row;
+    float q_row;
+    float z_row;
     float red_dx;
     float green_dx;
     float blue_dx;
     float alpha_dx;
     float u_dx;
     float v_dx;
+    float q_dx;
+    float z_dx;
     float red_dy;
     float green_dy;
     float blue_dy;
     float alpha_dy;
     float u_dy;
     float v_dy;
+    float q_dy;
+    float z_dy;
 
     float ar = a.color & 0xff;
     float ag = (a.color >> 8) & 0xff;
@@ -931,6 +1015,8 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 
     fast_palette = textured && a.color == 0xffffffffu &&
         b.color == 0xffffffffu && c.color == 0xffffffffu &&
+        !(ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) &&
+        !(ge_state.command[GE_CLEARMODE] & 0x400) &&
         prepare_triangle_palette(&fast);
 
     inverse_area = 1.0f / area;
@@ -943,10 +1029,19 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     wa_dy = (b.x - c.x) * inverse_area;
     wb_dy = (c.x - a.x) * inverse_area;
 
-    u_row = c.u + wa_row * (a.u - c.u) + wb_row * (b.u - c.u);
-    v_row = c.v + wa_row * (a.v - c.v) + wb_row * (b.v - c.v);
+    u_row = c.u * c.inv_w +
+        wa_row * (a.u * a.inv_w - c.u * c.inv_w) +
+        wb_row * (b.u * b.inv_w - c.u * c.inv_w);
+    v_row = c.v * c.inv_w +
+        wa_row * (a.v * a.inv_w - c.v * c.inv_w) +
+        wb_row * (b.v * b.inv_w - c.v * c.inv_w);
+    q_row = c.inv_w + wa_row * (a.inv_w - c.inv_w) +
+        wb_row * (b.inv_w - c.inv_w);
+    z_row = c.z + wa_row * (a.z - c.z) + wb_row * (b.z - c.z);
 
-    if (fast_palette) {
+    if (fast_palette && a.inv_w == b.inv_w && b.inv_w == c.inv_w) {
+        u_row /= a.inv_w;
+        v_row /= a.inv_w;
         u_dx = wa_dx * (a.u - c.u) + wb_dx * (b.u - c.u);
         v_dx = wa_dx * (a.v - c.v) + wb_dx * (b.v - c.v);
         u_dy = wa_dy * (a.u - c.u) + wb_dy * (b.u - c.u);
@@ -999,15 +1094,25 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     green_dx = wa_dx * (ag - cg) + wb_dx * (bg - cg);
     blue_dx = wa_dx * (ab - cb) + wb_dx * (bb - cb);
     alpha_dx = wa_dx * (aa - ca) + wb_dx * (ba - ca);
-    u_dx = wa_dx * (a.u - c.u) + wb_dx * (b.u - c.u);
-    v_dx = wa_dx * (a.v - c.v) + wb_dx * (b.v - c.v);
+    u_dx = wa_dx * (a.u * a.inv_w - c.u * c.inv_w) +
+        wb_dx * (b.u * b.inv_w - c.u * c.inv_w);
+    v_dx = wa_dx * (a.v * a.inv_w - c.v * c.inv_w) +
+        wb_dx * (b.v * b.inv_w - c.v * c.inv_w);
+    q_dx = wa_dx * (a.inv_w - c.inv_w) +
+        wb_dx * (b.inv_w - c.inv_w);
+    z_dx = wa_dx * (a.z - c.z) + wb_dx * (b.z - c.z);
 
     red_dy = wa_dy * (ar - cr) + wb_dy * (br - cr);
     green_dy = wa_dy * (ag - cg) + wb_dy * (bg - cg);
     blue_dy = wa_dy * (ab - cb) + wb_dy * (bb - cb);
     alpha_dy = wa_dy * (aa - ca) + wb_dy * (ba - ca);
-    u_dy = wa_dy * (a.u - c.u) + wb_dy * (b.u - c.u);
-    v_dy = wa_dy * (a.v - c.v) + wb_dy * (b.v - c.v);
+    u_dy = wa_dy * (a.u * a.inv_w - c.u * c.inv_w) +
+        wb_dy * (b.u * b.inv_w - c.u * c.inv_w);
+    v_dy = wa_dy * (a.v * a.inv_w - c.v * c.inv_w) +
+        wb_dy * (b.v * b.inv_w - c.v * c.inv_w);
+    q_dy = wa_dy * (a.inv_w - c.inv_w) +
+        wb_dy * (b.inv_w - c.inv_w);
+    z_dy = wa_dy * (a.z - c.z) + wb_dy * (b.z - c.z);
 
     for (y = top; y <= bottom; y++) {
         float wa = wa_row;
@@ -1018,6 +1123,8 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         float alpha = alpha_row;
         float u = u_row;
         float v = v_row;
+        float q = q_row;
+        float z = z_row;
 
         for (x = left; x <= right; x++) {
             float wc = 1.0f - wa - wb;
@@ -1029,12 +1136,12 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                     ((u32)(int)blue << 16) |
                     ((u32)(int)alpha << 24);
 
-                if (textured)
+                if (textured && q != 0.0f)
                     color = shade_pixel(
-                        texture_pixel((int)u, (int)v), color
+                        texture_pixel((int)(u / q), (int)(v / q)), color
                     );
 
-                draw_pixel(x, y, color);
+                draw_pixel_internal(x, y, color, z, 1);
             }
 
             wa += wa_dx;
@@ -1045,6 +1152,8 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
             alpha += alpha_dx;
             u += u_dx;
             v += v_dx;
+            q += q_dx;
+            z += z_dx;
         }
 
         wa_row += wa_dy;
@@ -1055,11 +1164,119 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         alpha_row += alpha_dy;
         u_row += u_dy;
         v_row += v_dy;
+        q_row += q_dy;
+        z_row += z_dy;
+    }
+}
+
+static float clip_distance(GeVertex v, int plane)
+{
+    if (plane == 0)
+        return v.clip_x + v.clip_w;
+    if (plane == 1)
+        return v.clip_w - v.clip_x;
+    if (plane == 2)
+        return v.clip_y + v.clip_w;
+    if (plane == 3)
+        return v.clip_w - v.clip_y;
+    if (plane == 4)
+        return v.clip_z + v.clip_w;
+    return v.clip_w - v.clip_z;
+}
+
+static GeVertex clip_vertex(GeVertex a, GeVertex b, float t)
+{
+    GeVertex out;
+    float ar = a.color & 0xff;
+    float ag = (a.color >> 8) & 0xff;
+    float ab = (a.color >> 16) & 0xff;
+    float aa = a.color >> 24;
+    float br = b.color & 0xff;
+    float bg = (b.color >> 8) & 0xff;
+    float bb = (b.color >> 16) & 0xff;
+    float ba = b.color >> 24;
+
+    out = a;
+    out.clip_x = a.clip_x + (b.clip_x - a.clip_x) * t;
+    out.clip_y = a.clip_y + (b.clip_y - a.clip_y) * t;
+    out.clip_z = a.clip_z + (b.clip_z - a.clip_z) * t;
+    out.clip_w = a.clip_w + (b.clip_w - a.clip_w) * t;
+    out.u = a.u + (b.u - a.u) * t;
+    out.v = a.v + (b.v - a.v) * t;
+    out.color =
+        (u32)(ar + (br - ar) * t) |
+        ((u32)(ag + (bg - ag) * t) << 8) |
+        ((u32)(ab + (bb - ab) * t) << 16) |
+        ((u32)(aa + (ba - aa) * t) << 24);
+    return out;
+}
+
+static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type)
+{
+    GeVertex first[10];
+    GeVertex second[10];
+    GeVertex *input = first;
+    GeVertex *output = second;
+    int count = 3;
+    int plane;
+    int i;
+
+    if (type & (1u << 23)) {
+        draw_triangle(a, b, c);
+        return;
+    }
+
+    first[0] = a;
+    first[1] = b;
+    first[2] = c;
+
+    for (plane = 0; plane < 6 && count; plane++) {
+        int output_count = 0;
+        GeVertex previous = input[count - 1];
+        float previous_distance = clip_distance(previous, plane);
+        int previous_inside = previous_distance >= 0.0f;
+
+        for (i = 0; i < count; i++) {
+            GeVertex current = input[i];
+            float current_distance = clip_distance(current, plane);
+            int current_inside = current_distance >= 0.0f;
+
+            if (current_inside != previous_inside) {
+                float t = previous_distance /
+                    (previous_distance - current_distance);
+                output[output_count++] = clip_vertex(previous, current, t);
+            }
+            if (current_inside)
+                output[output_count++] = current;
+
+            previous = current;
+            previous_distance = current_distance;
+            previous_inside = current_inside;
+        }
+
+        count = output_count;
+        {
+            GeVertex *swap = input;
+            input = output;
+            output = swap;
+        }
+    }
+
+    for (i = 1; i + 1 < count; i++) {
+        GeVertex v0 = input[0];
+        GeVertex v1 = input[i];
+        GeVertex v2 = input[i + 1];
+
+        if (ge3d_project_vertex(&v0, ge_state.command) &&
+            ge3d_project_vertex(&v1, ge_state.command) &&
+            ge3d_project_vertex(&v2, ge_state.command))
+            draw_triangle(v0, v1, v2);
     }
 }
 
 void draw_primitive(u32 argument)
 {
+    static int primitive_depth_logs;
     u32 type = ge_state.command[GE_VERTEXTYPE];
     int primitive = argument >> 16;
     int count = argument & 0xffff;
@@ -1070,6 +1287,19 @@ void draw_primitive(u32 argument)
         return;
 
     layout = vertex_layout(type);
+    if (!(type & (1u << 23)) &&
+        ((ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) ||
+        (type & 0x00000e60)) && primitive_depth_logs < 48) {
+        ge3d_log_matrices();
+        primitive_depth_logs++;
+        PRINT_3D_LOG("mapa 3d mandou a geometria tipo %08x bicho %d quantidade %d passo %d textura %u formato %u z %u teste %u endereco %08x indice %08x\n",
+            type, primitive, count, layout.stride,
+            ge_state.command[GE_TEXTURE_ENABLE] & 1,
+            ge_state.command[GE_TEXFORMAT] & 0xf,
+            ge_state.command[GE_DEPTH_TEST_ENABLE] & 1,
+            ge_state.command[GE_DEPTHTEST] & 7,
+            ge_state.vertex_address, ge_state.index_address);
+    }
     if (primitive == 6) {
         for (index = 0; index + 1 < count; index += 2)
             draw_sprite(
@@ -1081,20 +1311,22 @@ void draw_primitive(u32 argument)
 
     if (primitive == 3) {
         for (index = 0; index + 2 < count; index += 3)
-            draw_triangle(
+            draw_clipped_triangle(
                 read_vertex(index, type, layout),
                 read_vertex(index + 1, type, layout),
-                read_vertex(index + 2, type, layout)
+                read_vertex(index + 2, type, layout),
+                type
             );
         return;
     }
 
     if (primitive == 4) {
         for (index = 0; index + 2 < count; index++)
-            draw_triangle(
+            draw_clipped_triangle(
                 read_vertex(index, type, layout),
                 read_vertex(index + 1, type, layout),
-                read_vertex(index + 2, type, layout)
+                read_vertex(index + 2, type, layout),
+                type
             );
         return;
     }
@@ -1103,10 +1335,11 @@ void draw_primitive(u32 argument)
         GeVertex first = read_vertex(0, type, layout);
 
         for (index = 1; index + 1 < count; index++)
-            draw_triangle(
+            draw_clipped_triangle(
                 first,
                 read_vertex(index, type, layout),
-                read_vertex(index + 1, type, layout)
+                read_vertex(index + 1, type, layout),
+                type
             );
     }
 }

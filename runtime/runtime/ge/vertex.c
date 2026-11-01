@@ -100,12 +100,16 @@ static u32 vertex_index(int number, u32 type)
 
 GeVertex read_vertex(int number, u32 type, VertexLayout layout)
 {
+    static int vertex_depth_logs;
     int texture = type & 3;
     int color = (type >> 2) & 7;
     int position = (type >> 7) & 3;
     u32 index = vertex_index(number, type);
     const u8 *data = ge_pointer(ge_state.vertex_address);
     GeVertex vertex;
+    float raw_x;
+    float raw_y;
+    float raw_z;
 
     memset(&vertex, 0, sizeof(vertex));
     vertex.color = 0xffffffff;
@@ -153,7 +157,18 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
         vertex.z = *(const float *)(data + layout.position + 8);
     }
 
+    raw_x = vertex.x;
+    raw_y = vertex.y;
+    raw_z = vertex.z;
     ge3d_transform_vertex(&vertex, type, ge_state.command);
+    if (!(type & (1u << 23)) &&
+        ((ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) ||
+        (type & 0x00000e60)) && vertex_depth_logs < 48) {
+        vertex_depth_logs++;
+        PRINT_3D_LOG("vertice do mapa meteu tipo %08x numero %d cru %.3f %.3f %.3f clip %.3f %.3f %.3f %.3f tela %.3f %.3f %.3f uv %.3f %.3f\n",
+            type, number, raw_x, raw_y, raw_z,
+            vertex.clip_x, vertex.clip_y, vertex.clip_z,
+            vertex.clip_w, vertex.x, vertex.y, vertex.z, vertex.u, vertex.v);
+    }
     return vertex;
 }
-
