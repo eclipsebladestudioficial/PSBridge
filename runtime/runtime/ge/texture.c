@@ -6,6 +6,15 @@ static u8 ge_clut[1024] __attribute__((aligned(4)));
 static u32 ge_clut_entries;
 static int ge_clut_loaded;
 
+static u32 unpack_dxt_color(u16 color)
+{
+    u32 red = ((color >> 11) & 0x1f) * 255 / 31;
+    u32 green = ((color >> 5) & 0x3f) * 255 / 63;
+    u32 blue = (color & 0x1f) * 255 / 31;
+
+    return red | (green << 8) | (blue << 16) | 0xff000000;
+}
+
 u32 unpack_color(u16 color, int format)
 {
     u32 red;
@@ -303,8 +312,8 @@ u32 texture_pixel(int x, int y)
         const u8 *colors = block;
         u16 color0 = colors[4] | ((u16)colors[5] << 8);
         u16 color1 = colors[6] | ((u16)colors[7] << 8);
-        u32 c0 = unpack_color(color0, 0);
-        u32 c1 = unpack_color(color1, 0);
+        u32 c0 = unpack_dxt_color(color0);
+        u32 c1 = unpack_dxt_color(color1);
         u32 indices = (u32)colors[0] | ((u32)colors[1] << 8) | ((u32)colors[2] << 16) | ((u32)colors[3] << 24);
         int pos = ((y & 3) << 2) | (x & 3);
         int which = (indices >> (pos * 2)) & 3;
