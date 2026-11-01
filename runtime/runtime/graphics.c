@@ -86,7 +86,7 @@ int psbridge_graphics_start(void)
     return 0;
 }
 
-void psbridge_graphics_present(void)
+void psbridge_graphics_present(int submitted)
 {
     int x;
     int y;
@@ -117,4 +117,6 @@ void psbridge_graphics_present(void)
         GS_OUTPUT_WIDTH / 64,
         0
     );
+    if (submitted)
+        gsKit_display_buffer(gs);
 }

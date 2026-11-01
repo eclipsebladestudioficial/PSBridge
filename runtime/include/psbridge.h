@@ -35,7 +35,7 @@ int psbridge_utility(u32 nid, void *argument);
 u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3);
 u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5);
 int psbridge_graphics_start(void);
-void psbridge_graphics_present(void);
+void psbridge_graphics_present(int submitted);
 void psbridge_video_render_frame(u16 *pixels);
 void psbridge_video_log_frame(u32 frame_count);
 u64 psbridge_ge(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3);

@@ -294,7 +294,7 @@ u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
         framebuffer_width = a1;
         framebuffer_format = a2;
         (void)a3;
-        psbridge_graphics_present();
+        psbridge_graphics_present(1);
         return 0;
     }
 
@@ -308,7 +308,7 @@ u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
     ) {
         u32 cycles = nid == 0x77ed8b3a ? a0 : 1;
 
-        psbridge_graphics_present();
+        psbridge_graphics_present(0);
         wait_vblank(cycles, nid != 0x984c27e7);
         return 0;
     }
@@ -430,4 +430,3 @@ u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
             return 0x80618001u;
     }
 }
-
