@@ -676,6 +676,10 @@ static int draw_rgba8888_sprite(
 
 static void draw_sprite(GeVertex first, GeVertex second)
 {
+    if (first.x <= -99999.0f || first.y <= -99999.0f ||
+        second.x <= -99999.0f || second.y <= -99999.0f)
+        return;
+
     int left = (int)(first.x < second.x ? first.x : second.x);
     int top = (int)(first.y < second.y ? first.y : second.y);
     int right = (int)(first.x > second.x ? first.x : second.x);
@@ -811,6 +815,12 @@ static inline int triangle_palette_pixel(
 static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 {
     TrianglePalette fast;
+
+    if (a.x <= -99999.0f || a.y <= -99999.0f ||
+        b.x <= -99999.0f || b.y <= -99999.0f ||
+        c.x <= -99999.0f || c.y <= -99999.0f)
+        return;
+
     float area = edge(a, b, c.x, c.y);
     float inverse_area;
     float wa_row;
