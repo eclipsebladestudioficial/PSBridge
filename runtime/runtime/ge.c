@@ -66,6 +66,9 @@
 #define GE_SCISSOR1 0xd4
 #define GE_SCISSOR2 0xd5
 #define GE_ALPHATEST 0xdb
+#define GE_BLENDMODE 0xdf
+#define GE_BLENDFIXEDA 0xe0
+#define GE_BLENDFIXEDB 0xe1
 #define GE_TRANSFERSTART 0xea
 #define GE_TRANSFERSRCPOS 0xeb
 #define GE_TRANSFERDSTPOS 0xec
@@ -127,6 +130,7 @@ static GeState state;
 static u8 ge_clut[1024] __attribute__((aligned(4)));
 static u32 ge_clut_entries;
 static int ge_clut_loaded;
+static int ge_blend_mode_seen;
 static int next_list_id = 1;
 static int next_callback_id = 1;
 typedef struct {
@@ -342,21 +346,75 @@ static int compare_alpha(int function, int value, int reference)
     return value >= reference;
 }
 
+static int blend_factor(int type, u32 source, u32 destination, u32 fixed, int shift, int source_factor)
+{
+    int src_alpha = (source >> 24) & 0xff;
+    int dst_alpha = (destination >> 24) & 0xff;
+    int other = (source_factor ? destination : source) >> shift & 0xff;
+
+    switch (type) {
+    case 0: return other;
+    case 1: return 255 - other;
+    case 2: return src_alpha;
+    case 3: return 255 - src_alpha;
+    case 4: return dst_alpha;
+    case 5: return 255 - dst_alpha;
+    case 6: return src_alpha * 2;
+    case 7: return 255 - src_alpha * 2;
+    case 8: return dst_alpha * 2;
+    case 9: return 255 - dst_alpha * 2;
+    default: return (fixed >> shift) & 0xff;
+    }
+}
+
 static u32 blend_color(u32 source, u32 destination)
 {
-    u32 alpha = source >> 24;
-    u32 inverse = 255 - alpha;
-    u32 red;
-    u32 green;
-    u32 blue;
-    u32 output_alpha;
+    u32 mode = state.command[GE_BLENDMODE];
+    int src_factor = mode & 0xf;
+    int dst_factor = (mode >> 4) & 0xf;
+    int operation = (mode >> 8) & 7;
+    u32 result = 0;
+    int shift;
 
-    red = ((source & 0xff) * alpha + (destination & 0xff) * inverse) / 255;
-    green = (((source >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse) / 255;
-    blue = (((source >> 16) & 0xff) * alpha + ((destination >> 16) & 0xff) * inverse) / 255;
-    output_alpha = alpha + ((destination >> 24) * inverse) / 255;
+    if (!ge_blend_mode_seen) {
+        src_factor = 2;
+        dst_factor = 3;
+        operation = 0;
+    }
 
-    return red | (green << 8) | (blue << 16) | (output_alpha << 24);
+    if (src_factor == 2 && dst_factor == 3 && operation == 0) {
+        u32 alpha = source >> 24;
+        u32 inverse = 255 - alpha;
+        u32 red = ((source & 0xff) * alpha + (destination & 0xff) * inverse) / 255;
+        u32 green = (((source >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse) / 255;
+        u32 blue = (((source >> 16) & 0xff) * alpha + ((destination >> 16) & 0xff) * inverse) / 255;
+        u32 output_alpha = alpha + ((destination >> 24) * inverse) / 255;
+        return red | (green << 8) | (blue << 16) | (output_alpha << 24);
+    }
+
+    for (shift = 0; shift < 24; shift += 8) {
+        int src = (source >> shift) & 0xff;
+        int dst = (destination >> shift) & 0xff;
+        int a = blend_factor(src_factor, source, destination, state.command[GE_BLENDFIXEDA], shift, 1);
+        int b = blend_factor(dst_factor, source, destination, state.command[GE_BLENDFIXEDB], shift, 0);
+        int value;
+
+        switch (operation) {
+        case 1: value = (src * a - dst * b) / 255; break;
+        case 2: value = (dst * b - src * a) / 255; break;
+        case 3: value = src < dst ? src : dst; break;
+        case 4: value = src > dst ? src : dst; break;
+        case 5: value = src > dst ? src - dst : dst - src; break;
+        default: value = (src * a + dst * b) / 255; break;
+        }
+        if (value < 0)
+            value = 0;
+        if (value > 255)
+            value = 255;
+        result |= (u32)value << shift;
+    }
+
+    return result | (source & 0xff000000u);
 }
 
 static int pixel_offset(int x, int y, int row_bytes, int bytes, int swizzled)
@@ -573,10 +631,6 @@ static u32 shade_pixel(u32 texture, u32 vertex)
     else if (function != 1 && use_alpha)
         output_alpha = (texture_alpha * vertex_alpha) / 255;
 
-    if (function == 0 && (vertex & 0x00ffffff) == 0) {
-    vertex = (vertex & 0xff000000) | 0x00ffffff;
-}
-
     for (channel = 0; channel < 3; channel++) {
         u32 shift = channel * 8;
         u32 t = (texture >> shift) & 0xff;
@@ -613,7 +667,6 @@ static int prepare_triangle_palette(TrianglePalette *fast)
 {
     int buffer_width;
     int entries;
-    int use_alpha;
     int blend;
     int alpha_test;
     u32 alpha_command;
@@ -646,7 +699,6 @@ static int prepare_triangle_palette(TrianglePalette *fast)
     if (!fast->texture || !fast->frame || fast->frame_width < 64)
         return 0;
 
-    use_alpha = state.command[GE_TEXFUNC] & 0x100;
     blend = state.command[GE_BLEND_ENABLE] & 1;
     fast->blend = blend;
     alpha_test = state.command[GE_ALPHA_TEST_ENABLE] & 1;
@@ -655,10 +707,7 @@ static int prepare_triangle_palette(TrianglePalette *fast)
     entries = fast->format == 4 ? 16 : 256;
 
     for (index = 0; index < entries; index++) {
-        u32 color = palette_color(index);
-
-        if (!use_alpha)
-            color |= 0xff000000;
+        u32 color = shade_pixel(palette_color(index), 0xffffffffu);
 
         fast->visible[index] = !alpha_test || compare_alpha(
             alpha_command & 7,
@@ -773,13 +822,6 @@ static void draw_pixel(int x, int y, u32 color)
     } else if (state.command[GE_BLEND_ENABLE] & 1) {
         destination = read_frame_pixel(frame, index, format);
 
-        if (
-            (state.command[GE_TEXTURE_ENABLE] & 1) &&
-            ((state.command[GE_TEXFUNC] & 7) == 0)
-        ) {
-            color = (color & 0x00ffffff) | 0xff000000;
-        }
-        
         color = blend_color(color, destination);
     }
 
@@ -1345,19 +1387,10 @@ static int draw_clut4_sprite(
 
             color = colors[index];
 
-            if (!blend || (color >> 24) == 255) {
+            if (blend)
+                *row = blend_color(color, *row);
+            else
                 *row = color;
-            } else if (color >> 24) {
-                u32 destination = *row;
-                u32 alpha = color >> 24;
-                u32 inverse = 255 - alpha;
-                u32 red = ((color & 0xff) * alpha + (destination & 0xff) * inverse) / 255;
-                u32 green = (((color >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse) / 255;
-                u32 blue = (((color >> 16) & 0xff) * alpha + ((destination >> 16) & 0xff) * inverse) / 255;
-                u32 output_alpha = alpha + ((destination >> 24) * inverse) / 255;
-
-                *row = red | (green << 8) | (blue << 16) | (output_alpha << 24);
-            }
 
             row++;
             u += du;
@@ -1541,19 +1574,10 @@ static int draw_rgba8888_sprite(
                 continue;
             }
 
-            if (!blend || (color >> 24) == 255) {
+            if (blend)
+                *row = blend_color(color, *row);
+            else
                 *row = color;
-            } else if (color >> 24) {
-                u32 destination = *row;
-                u32 alpha = color >> 24;
-                u32 inverse = 255 - alpha;
-                u32 red = ((color & 0xff) * alpha + (destination & 0xff) * inverse) / 255;
-                u32 green = (((color >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse) / 255;
-                u32 blue = (((color >> 16) & 0xff) * alpha + ((destination >> 16) & 0xff) * inverse) / 255;
-                u32 output_alpha = alpha + ((destination >> 24) * inverse) / 255;
-
-                *row = red | (green << 8) | (blue << 16) | (output_alpha << 24);
-            }
 
             row++;
             u += du;
@@ -1800,12 +1824,10 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 
                     if (triangle_palette_pixel(&fast, (int)u, (int)v, &color)) {
                         u32 *destination = &row[x - left];
-                        u32 alpha = color >> 24;
-
-                         if (!fast.blend || alpha == 255)
-                              *destination = color;
-                         else if (alpha != 0)
-                              *destination = blend_color(color, *destination);
+                        if (fast.blend)
+                            *destination = blend_color(color, *destination);
+                        else
+                            *destination = color;
                     }
                 }
 
@@ -2014,6 +2036,8 @@ static void execute_list(GeList *list)
         argument = word & 0x00ffffff;
         list->pc += 4;
         state.command[command] = argument;
+        if (command == GE_BLENDMODE)
+            ge_blend_mode_seen = 1;
         if (command >= GE_WORLDMATRIXNUMBER && command <= GE_PROJMATRIXDATA)
             ge3d_matrix_command(command, argument);
 
