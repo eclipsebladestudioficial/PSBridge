@@ -27,6 +27,78 @@ static u32 ge_world_index;
 static u32 ge_view_index;
 static u32 ge_projection_index;
 
+static void ge3d_skinning_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_morph_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_patch_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_texture_generation_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_viewport_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_lighting_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_material_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_clipping_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_culling_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_depth_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_stencil_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
+static void ge3d_fog_command(u32 command, u32 value)
+{
+    (void)command;
+    (void)value;
+}
+
 static float ge3d_float(u32 argument)
 {
     union {
@@ -58,6 +130,41 @@ void ge3d_matrix_command(u32 command, u32 value)
             ge_projection[ge_projection_index] = ge3d_float(value);
         ge_projection_index = (ge_projection_index + 1) & 15;
     }
+}
+
+void ge3d_command(u32 command, u32 value)
+{
+    if (command == 0x05 || command == 0x06 ||
+        (command >= 0x36 && command <= 0x38))
+        ge3d_patch_command(command, value);
+    else if (command >= 0x2a && command <= 0x2b)
+        ge3d_skinning_command(command, value);
+    else if (command >= 0x2c && command <= 0x33)
+        ge3d_morph_command(command, value);
+    else if (command >= 0x3a && command <= 0x3f)
+        ge3d_matrix_command(command, value);
+    else if (command == 0x40 || command == 0x41 ||
+        command == 0xc0 || command == 0xc1)
+        ge3d_texture_generation_command(command, value);
+    else if (command >= 0x42 && command <= 0x4d)
+        ge3d_viewport_command(command, value);
+    else if ((command >= 0x17 && command <= 0x1b) ||
+        (command >= 0x5f && command <= 0x9a))
+        ge3d_lighting_command(command, value);
+    else if (command >= 0x53 && command <= 0x5e)
+        ge3d_material_command(command, value);
+    else if (command == 0x1c || command == 0xd6 || command == 0xd7)
+        ge3d_clipping_command(command, value);
+    else if (command == 0x1d || command == 0x9b)
+        ge3d_culling_command(command, value);
+    else if (command == 0x23 || command == 0x9e || command == 0x9f ||
+        command == 0xde || command == 0xe7)
+        ge3d_depth_command(command, value);
+    else if (command == 0x24 || command == 0xdc || command == 0xdd)
+        ge3d_stencil_command(command, value);
+    else if (command == 0x1f ||
+        (command >= 0xcd && command <= 0xcf))
+        ge3d_fog_command(command, value);
 }
 
 void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
@@ -136,4 +243,3 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
         v->v *= (float)(1 << ((commands[GE_TEXSIZE0] >> 8) & 0xf));
     }
 }
-

@@ -169,8 +169,7 @@ void execute_list(GeList *list)
         ge_state.command[command] = argument;
         if (command == GE_BLENDMODE)
             ge_blend_mode_seen = 1;
-        if (command >= GE_WORLDMATRIXNUMBER && command <= GE_PROJMATRIXDATA)
-            ge3d_matrix_command(command, argument);
+        ge3d_command(command, argument);
 
         if (command == GE_TEXFUNC || command == GE_VERTEXTYPE || command == GE_TEXFORMAT) {
 
@@ -279,4 +278,3 @@ int enqueue_list(u32 address, u32 stall, int callback_id)
     execute_list(list);
     return list->id;
 }
-

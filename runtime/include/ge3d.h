@@ -13,6 +13,7 @@ typedef struct {
 } GeVertex;
 
 void ge3d_matrix_command(u32 command, u32 value);
+void ge3d_command(u32 command, u32 value);
 void ge3d_transform_vertex(GeVertex *vertex, u32 type, const u32 *commands);
 
 #endif
