@@ -166,8 +166,6 @@ static void controller_update_history(void)
 
     current = controller_history[(controller_written - 1) % CTRL_HISTORY_SIZE];
     for (index = 0; index < steps; index++) {
-        u32 previous = current.buttons;
-
         controller_last_sample += CTRL_SAMPLE_INTERVAL_US;
         if (index + 1 == steps) {
             start_controller();
@@ -179,22 +177,6 @@ static void controller_update_history(void)
         if (!controller_sampling_mode) {
             current.lx = 128;
             current.ly = 128;
-        }
-
-        if ((previous ^ current.buttons) & 0x4000u) {
-            static unsigned cross_logs;
-            if (cross_logs++ < 20)
-                PRINT_LOG("controle X %s na putaria amostra %u botoes %08x\n",
-                    (current.buttons & 0x4000u) ? "entrou" : "vazou",
-                    current.timestamp, current.buttons);
-        }
-
-        if ((previous ^ current.buttons) & 0x8u) {
-            static unsigned logs;
-            if (logs++ < 16)
-                PRINT_LOG("controle START %s na amostra %u botoes %08x\n",
-                    (current.buttons & 0x8u) ? "entrou na putaria" : "vazou da putaria",
-                    current.timestamp, current.buttons);
         }
 
         controller_history[controller_written % CTRL_HISTORY_SIZE] = current;
@@ -262,14 +244,6 @@ int psbridge_controller_read(void *output, int count, u32 nid)
 
     if (!peek)
         controller_last_read = controller_written;
-
-    if (peek && available > 1 &&
-        ((samples[0].buttons ^ samples[available - 1].buttons) & 0x8u)) {
-        static unsigned logs;
-        if (logs++ < 12)
-            PRINT_LOG("controle entregou %u amostras START velho %08x novo %08x\n",
-                (u32)available, samples[0].buttons, samples[available - 1].buttons);
-    }
 
     return (int)available;
 }
