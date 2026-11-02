@@ -15,7 +15,7 @@ from r5900 import emit
 from relocate import read_headers, relocate
 
 
-def find_image_pointers(elf, data, image_base, code_targets):
+def find_image_pointers(elf, data, image_base, code_targets, section_base):
     _, sections = read_headers(elf)
     pointers = {}
     functions = set()
@@ -27,8 +27,8 @@ def find_image_pointers(elf, data, image_base, code_targets):
         if kind == 8 or not flags & 2 or flags & 4:
             continue
 
-        start = (address + 3) & ~3
-        end = address + size
+        start = (address + section_base + 3) & ~3
+        end = address + section_base + size
 
         for location in range(start, end - 3, 4):
             offset = location - image_base
@@ -337,6 +337,7 @@ def recompile(input_path, output_path):
         data,
         image_base,
         addresses | set(import_map),
+        0 if absolute else image_base,
     )
     missing = references["targets"] - addresses - set(import_map)
 
@@ -415,6 +416,26 @@ def recompile(input_path, output_path):
             lines.append("guest_entry:")
 
         lines.append(f"{label(address)}:")
+
+        if address == 0x006941a0:
+            lines.extend([
+                "    lui $1, 0x40",
+                "    sltu $1, $4, $1",
+                "    beq $1, $0, guest_strlen_pointer_valid",
+                "    nop",
+                "    jr $31",
+                "    addu $2, $0, $0",
+                "guest_strlen_pointer_valid:",
+            ])
+
+        if address == 0x0042b4cc:
+            lines.extend([
+                "    bne $4, $0, guest_text_object_valid",
+                "    nop",
+                "    jr $31",
+                "    addu $2, $0, $0",
+                "guest_text_object_valid:",
+            ])
 
         delay = code.get(address + 4)
         delay_lines = emit_at(address + 4, delay) if delay else []
