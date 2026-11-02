@@ -12,11 +12,18 @@ from elf_reader import read_code, read_header, read_segments, read_word
 from module_sexytion import add_image, add_info, add_map, add_overlay_map, write_map
 from imports import find_module, read_imports, import_symbol, link_imports
 from r5900 import emit
-from relocate import read_headers, relocate
+from relocate import read_headers, read_relocations, patch_offset, relocate
 
 
 def find_image_pointers(elf, data, image_base, code_targets, section_base):
-    _, sections = read_headers(elf)
+    programs, sections = read_headers(elf)
+    image_start = min(program[2] for program in programs if program[0] == 1)
+    relocated_words = {
+        patch_offset(programs, entry, image_start)
+        for table in read_relocations(elf, sections)
+        for entry in table
+        if (entry[1] & 0xff) == 2
+    }
     pointers = {}
     functions = set()
     image_end = image_base + len(data)
@@ -33,7 +40,7 @@ def find_image_pointers(elf, data, image_base, code_targets, section_base):
         for location in range(start, end - 3, 4):
             offset = location - image_base
 
-            if offset < 0 or offset + 4 > len(data):
+            if offset not in relocated_words or offset < 0 or offset + 4 > len(data):
                 continue
 
             value = struct.unpack_from("<I", data, offset)[0]
