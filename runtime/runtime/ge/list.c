@@ -140,6 +140,7 @@ GeList *find_list(int id)
 void execute_list(GeList *list)
 {
     int commands = 0;
+    ge_dxt_new_list();
 
     while (!list->done && commands++ < GE_COMMAND_LIMIT) {
         const u32 *instruction;
@@ -202,9 +203,12 @@ void execute_list(GeList *list)
             draw_primitive(argument);
         } else if (command == GE_TRANSFERSTART) {
             transfer_pixels();
+            ge_dxt_dirty();
         }
         else if (command == GE_LOADCLUT)
             load_clut(argument);
+        else if (command == 0xcb)
+            ge_dxt_dirty();
         else if (command == GE_JUMP)
             list->pc = relative_address(argument & 0x00fffffc);
         else if (command == GE_CALL && list->stack_size < GE_STACK_LIMIT) {

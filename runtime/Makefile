@@ -67,3 +67,5 @@ clean:
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal
+
+$(RUNTIME_BUILD)/runtime/ge/raster.o: EE_CFLAGS += -O3

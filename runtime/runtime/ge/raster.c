@@ -890,9 +890,160 @@ static inline int triangle_palette_pixel(
     return 1;
 }
 
+typedef struct {
+    u32 *frame;
+    u16 *depth;
+    int width;
+    int depth_width;
+    int alpha_test;
+    int alpha_function;
+    int alpha_reference;
+    int alpha_mask;
+    int depth_test;
+    int depth_function;
+    int depth_write;
+    int clear;
+    int blend;
+    int blend_source_alpha;
+} TriangleTarget;
+
+static int triangle_target_setup(TriangleTarget *target)
+{
+    u32 alpha_command = ge_state.command[GE_ALPHATEST];
+    target->width = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
+    if ((ge_state.command[GE_FRAMEBUF_FORMAT] & 3) != 3 ||
+        target->width < 64 || target->width > 2048)
+        return 0;
+    target->frame = ge_pointer(buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH));
+    if (!target->frame)
+        return 0;
+    target->clear = ge_state.command[GE_CLEARMODE];
+    target->blend = ge_state.command[GE_BLEND_ENABLE] & 1;
+    target->blend_source_alpha = !ge_blend_mode_seen ||
+        ((ge_state.command[GE_BLENDMODE] & 0x7ff) == 0x32);
+    target->alpha_test = (ge_state.command[GE_ALPHA_TEST_ENABLE] & 1) && !(target->clear & 1);
+    target->alpha_function = alpha_command & 7;
+    target->alpha_mask = (alpha_command >> 16) & 0xff;
+    target->alpha_reference = (alpha_command >> 8) & target->alpha_mask;
+    target->depth_width = ge_state.command[GE_DEPTHBUF_WIDTH] & 0x7fc;
+    target->depth = ge_pointer(buffer_address(GE_DEPTHBUF_BASE, GE_DEPTHBUF_WIDTH));
+    if (target->depth_width < 64 || target->depth_width > 2048)
+        target->depth = NULL;
+    target->depth_test = (ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) && !(target->clear & 1);
+    target->depth_function = ge_state.command[GE_DEPTHTEST] & 7;
+    target->depth_write = (target->clear & 0x400) ||
+        (!(target->clear & 1) && !(ge_state.command[GE_DEPTH_WRITE_DISABLE] & 1));
+    return 1;
+}
+
+static inline __attribute__((always_inline)) void triangle_target_pixel(
+    const TriangleTarget *target, int x, int y, u32 color, float depth)
+{
+    int index = y * target->width + x;
+    int depth_index = y * target->depth_width + x;
+    u16 value = 0;
+    if (target->alpha_test && !compare_alpha(
+        target->alpha_function, (color >> 24) & target->alpha_mask,
+        target->alpha_reference))
+        return;
+    if (target->depth) {
+        if (depth < 0.0f) depth = 0.0f;
+        if (depth > 65535.0f) depth = 65535.0f;
+        value = (u16)(u32)depth;
+        if (target->depth_test && !compare_alpha(
+            target->depth_function, value, target->depth[depth_index]))
+            return;
+    }
+    if (target->clear & 1) {
+        u32 destination = target->frame[index];
+        if (!(target->clear & 0x100))
+            color = (color & 0xff000000u) | (destination & 0x00ffffffu);
+        if (!(target->clear & 0x200))
+            color = (color & 0x00ffffffu) | (destination & 0xff000000u);
+    } else if (target->blend) {
+        if (target->blend_source_alpha) {
+            if ((color >> 24) == 0) {
+                if (target->depth && target->depth_write)
+                    target->depth[depth_index] = value;
+                return;
+            }
+            if ((color >> 24) != 255)
+                color = blend_color(color, target->frame[index]);
+        } else {
+            color = blend_color(color, target->frame[index]);
+        }
+    }
+    target->frame[index] = color;
+    if (target->depth && target->depth_write)
+        target->depth[depth_index] = value;
+}
+
+static inline void triangle_scan_span(
+    GeVertex a, GeVertex b, GeVertex c, int y,
+    int left, int right, int *start, int *end)
+{
+    float py = (float)y + 0.5f;
+    float minx = 1.0e30f;
+    float maxx = -1.0e30f;
+    float yy[3] = {a.y, b.y, c.y};
+    float xx[3] = {a.x, b.x, c.x};
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        int next = (i + 1) % 3;
+        float y0 = yy[i];
+        float y1 = yy[next];
+        if ((y0 <= py && py <= y1) || (y1 <= py && py <= y0)) {
+            if (y0 != y1) {
+                float at = xx[i] + (py - y0) * (xx[next] - xx[i]) / (y1 - y0);
+                if (at < minx) minx = at;
+                if (at > maxx) maxx = at;
+            }
+        }
+    }
+    if (maxx < minx) {
+        *start = right + 1;
+        *end = right;
+        return;
+    }
+    if (minx > left + 2.0f) {
+        int n = (int)minx - 2;
+        if (n > left) left = n;
+    }
+    if (maxx < right - 2.0f) {
+        int n = (int)maxx + 2;
+        if (n < right) right = n;
+    }
+    *start = left;
+    *end = right;
+}
+
+static inline __attribute__((always_inline)) u32 blend_dxt_packed(u32 source, u32 destination)
+{
+    u32 alpha = source >> 24;
+    u32 inverse = 255u - alpha;
+    u32 rb = (source & 0x00ff00ffu) * alpha +
+        (destination & 0x00ff00ffu) * inverse;
+    u32 green = ((source >> 8) & 255u) * alpha +
+        ((destination >> 8) & 255u) * inverse;
+    u32 output_alpha = alpha +
+        (((destination >> 24) * inverse + 1u +
+        (((destination >> 24) * inverse) >> 8)) >> 8);
+    rb = ((rb + 0x00010001u + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+    green = (green + 1u + (green >> 8)) >> 8;
+    return rb | (green << 8) | (output_alpha << 24);
+}
+
 static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 {
     TrianglePalette fast;
+    GeDxtSampler dxt;
+    TriangleTarget target;
+    int fast_target;
+    int fast_dxt;
+    int affine;
+    int direct_white;
+    int texfunc;
 
     if (a.x <= -99999.0f || a.y <= -99999.0f ||
         b.x <= -99999.0f || b.y <= -99999.0f ||
@@ -1013,6 +1164,20 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     if (right < left || bottom < top)
         return;
 
+    fast_target = triangle_target_setup(&target);
+    affine = a.inv_w == 1.0f && b.inv_w == 1.0f && c.inv_w == 1.0f;
+    texfunc = ge_state.command[GE_TEXFUNC] & 7;
+    direct_white = textured &&
+        a.color == 0xffffffffu &&
+        b.color == 0xffffffffu &&
+        c.color == 0xffffffffu &&
+        (texfunc == 0 || texfunc == 3);
+
+    fast_dxt = textured &&
+        ((ge_state.command[GE_TEXFORMAT] & 15) == 8 ||
+         (ge_state.command[GE_TEXFORMAT] & 15) == 9) &&
+        ge_dxt_setup(&dxt);
+
     fast_palette = textured && a.color == 0xffffffffu &&
         b.color == 0xffffffffu && c.color == 0xffffffffu &&
         !(ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) &&
@@ -1048,21 +1213,31 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         v_dy = wa_dy * (a.v - c.v) + wb_dy * (b.v - c.v);
 
         for (y = top; y <= bottom; y++) {
-            float wa = wa_row;
-            float wb = wb_row;
-            float u = u_row;
-            float v = v_row;
+            int xstart;
+            int xend;
+            float wa;
+            float wb;
+            float u;
+            float v;
+            u32 *row;
+            float skip;
 
-            u32 *row = fast.frame + y * fast.frame_width + left;
+            triangle_scan_span(a, b, c, y, left, right, &xstart, &xend);
+            skip = (float)(xstart - left);
+            wa = wa_row + skip * wa_dx;
+            wb = wb_row + skip * wb_dx;
+            u = u_row + skip * u_dx;
+            v = v_row + skip * v_dx;
+            row = fast.frame + y * fast.frame_width + xstart;
 
-            for (x = left; x <= right; x++) {
+            for (x = xstart; x <= xend; x++) {
                 float wc = 1.0f - wa - wb;
 
                 if (wa >= 0.0f && wb >= 0.0f && wc >= 0.0f) {
                     u32 color;
 
                     if (triangle_palette_pixel(&fast, (int)u, (int)v, &color)) {
-                        u32 *destination = &row[x - left];
+                        u32 *destination = &row[x - xstart];
                         if (fast.blend)
                             *destination = blend_color(color, *destination);
                         else
@@ -1082,6 +1257,159 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
             v_row += v_dy;
         }
 
+        return;
+    }
+
+    if (direct_white && fast_dxt && fast_target &&
+        a.inv_w == b.inv_w && b.inv_w == c.inv_w && a.inv_w != 0.0f) {
+        float inv_q = 1.0f / a.inv_w;
+        float tex_u_row = u_row * inv_q;
+        float tex_v_row = v_row * inv_q;
+        float tex_u_dx = wa_dx * (a.u - c.u) + wb_dx * (b.u - c.u);
+        float tex_v_dx = wa_dx * (a.v - c.v) + wb_dx * (b.v - c.v);
+        float tex_u_dy = wa_dy * (a.u - c.u) + wb_dy * (b.u - c.u);
+        float tex_v_dy = wa_dy * (a.v - c.v) + wb_dy * (b.v - c.v);
+        int tex_alpha = ge_state.command[GE_TEXFUNC] & 0x100;
+        int direct_target = !target.alpha_test && !target.depth_test &&
+            !(target.depth && target.depth_write) && !(target.clear & 1) &&
+            (!target.blend || target.blend_source_alpha);
+
+        z_dx = wa_dx * (a.z - c.z) + wb_dx * (b.z - c.z);
+        z_dy = wa_dy * (a.z - c.z) + wb_dy * (b.z - c.z);
+
+        for (y = top; y <= bottom; y++) {
+            int xstart, xend;
+            float skip;
+            float wa, wb, u, v, z;
+
+            triangle_scan_span(a, b, c, y, left, right, &xstart, &xend);
+            skip = (float)(xstart - left);
+            wa = wa_row + skip * wa_dx;
+            wb = wb_row + skip * wb_dx;
+            u = tex_u_row + skip * tex_u_dx;
+            v = tex_v_row + skip * tex_v_dx;
+            z = z_row + skip * z_dx;
+
+            while (xstart <= xend &&
+                (wa < 0.0f || wb < 0.0f || 1.0f - wa - wb < 0.0f)) {
+                xstart++;
+                wa += wa_dx;
+                wb += wb_dx;
+                u += tex_u_dx;
+                v += tex_v_dx;
+                z += z_dx;
+            }
+            if (xstart <= xend) {
+                float wa_end = wa + (float)(xend - xstart) * wa_dx;
+                float wb_end = wb + (float)(xend - xstart) * wb_dx;
+                while (xend >= xstart &&
+                    (wa_end < 0.0f || wb_end < 0.0f ||
+                     1.0f - wa_end - wb_end < 0.0f)) {
+                    xend--;
+                    wa_end -= wa_dx;
+                    wb_end -= wb_dx;
+                }
+                if (direct_target && dxt.ready_complete) {
+                    u32 *out = target.frame + y * target.width + xstart;
+                    int count = xend - xstart + 1;
+                    int iu = (int)u;
+                    int iv = (int)v;
+                    float du_error = (tex_u_dx - 1.0f) * (float)(count - 1);
+                    float dv_error = tex_v_dx * (float)(count - 1);
+                    float uf = u - (float)iu;
+                    float vf = v - (float)iv;
+                    int linear = count > 0 && iu >= 0 && iv >= 0 &&
+                        iu + count <= dxt.width && iv < dxt.height &&
+                        du_error > -0.04f && du_error < 0.04f &&
+                        dv_error > -0.04f && dv_error < 0.04f &&
+                        uf > 0.08f && uf < 0.92f &&
+                        vf > 0.08f && vf < 0.92f;
+                    if (linear) {
+                        const u32 *pixels = dxt.ready_pixels + iv * dxt.width + iu;
+                        if (dxt.ready_opaque || (!target.blend && tex_alpha)) {
+                            memcpy(out, pixels, count * sizeof(u32));
+                        } else {
+                            x = 0;
+                            while (x < count) {
+                                u32 color = pixels[x];
+                                u32 alpha = tex_alpha ? color >> 24 : 255u;
+                                if (alpha == 255u) {
+                                    int begin = x;
+                                    do {
+                                        x++;
+                                    } while (x < count &&
+                                        (!tex_alpha || (pixels[x] >> 24) == 255u));
+                                    if (tex_alpha)
+                                        memcpy(out + begin, pixels + begin, (x - begin) * sizeof(u32));
+                                    else {
+                                        int j;
+                                        for (j = begin; j < x; j++)
+                                            out[j] = pixels[j] | 0xff000000u;
+                                    }
+                                } else if (alpha == 0u) {
+                                    x++;
+                                } else {
+                                    out[x] = blend_dxt_packed(color, out[x]);
+                                    x++;
+                                }
+                            }
+                        }
+                    } else {
+                        for (x = xstart; x <= xend; x++) {
+                            u32 color = ge_dxt_ready_pixel(&dxt, (int)u, (int)v);
+                            if (!tex_alpha)
+                                color |= 0xff000000u;
+                            if (!target.blend || (color >> 24) == 255)
+                                *out = color;
+                            else if (color >> 24)
+                                *out = blend_dxt_packed(color, *out);
+                            out++;
+                            u += tex_u_dx;
+                            v += tex_v_dx;
+                        }
+                    }
+                } else if (direct_target) {
+                    u32 *out = target.frame + y * target.width + xstart;
+                    for (x = xstart; x <= xend; x++) {
+                        u32 color = ge_dxt_cached_pixel(&dxt, (int)u, (int)v);
+                        if (!tex_alpha)
+                            color |= 0xff000000u;
+                        if (!target.blend || (color >> 24) == 255)
+                            *out = color;
+                        else if (color >> 24)
+                            *out = blend_dxt_packed(color, *out);
+                        out++;
+                        u += tex_u_dx;
+                        v += tex_v_dx;
+                    }
+                } else if (dxt.ready_complete) {
+                    for (x = xstart; x <= xend; x++) {
+                        u32 color = ge_dxt_ready_pixel(&dxt, (int)u, (int)v);
+                        if (!tex_alpha)
+                            color |= 0xff000000u;
+                        triangle_target_pixel(&target, x, y, color, z);
+                        u += tex_u_dx;
+                        v += tex_v_dx;
+                        z += z_dx;
+                    }
+                } else {
+                    for (x = xstart; x <= xend; x++) {
+                        u32 color = ge_dxt_cached_pixel(&dxt, (int)u, (int)v);
+                        if (!tex_alpha)
+                            color |= 0xff000000u;
+                        triangle_target_pixel(&target, x, y, color, z);
+                        u += tex_u_dx;
+                        v += tex_v_dx;
+                        z += z_dx;
+                    }
+                }
+            }
+            wa_row += wa_dy;
+            wb_row += wb_dy;
+            tex_u_row += tex_u_dy;
+            tex_v_row += tex_v_dy;
+            z_row += z_dy;
+        }
         return;
     }
 
@@ -1115,18 +1443,34 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     z_dy = wa_dy * (a.z - c.z) + wb_dy * (b.z - c.z);
 
     for (y = top; y <= bottom; y++) {
-        float wa = wa_row;
-        float wb = wb_row;
-        float red = red_row;
-        float green = green_row;
-        float blue = blue_row;
-        float alpha = alpha_row;
-        float u = u_row;
-        float v = v_row;
-        float q = q_row;
-        float z = z_row;
+        int xstart;
+        int xend;
+        float skip;
+        float wa;
+        float wb;
+        float red;
+        float green;
+        float blue;
+        float alpha;
+        float u;
+        float v;
+        float q;
+        float z;
 
-        for (x = left; x <= right; x++) {
+        triangle_scan_span(a, b, c, y, left, right, &xstart, &xend);
+        skip = (float)(xstart - left);
+        wa = wa_row + skip * wa_dx;
+        wb = wb_row + skip * wb_dx;
+        red = red_row + skip * red_dx;
+        green = green_row + skip * green_dx;
+        blue = blue_row + skip * blue_dx;
+        alpha = alpha_row + skip * alpha_dx;
+        u = u_row + skip * u_dx;
+        v = v_row + skip * v_dx;
+        q = q_row + skip * q_dx;
+        z = z_row + skip * z_dx;
+
+        for (x = xstart; x <= xend; x++) {
             float wc = 1.0f - wa - wb;
 
             if (wa >= 0.0f && wb >= 0.0f && wc >= 0.0f) {
@@ -1136,12 +1480,24 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                     ((u32)(int)blue << 16) |
                     ((u32)(int)alpha << 24);
 
-                if (textured && q != 0.0f)
-                    color = shade_pixel(
-                        texture_pixel((int)(u / q), (int)(v / q)), color
-                    );
+                if (textured && q != 0.0f) {
+                    float invq = affine ? 1.0f : 1.0f / q;
+                    int tx = (int)(u * invq);
+                    int ty = (int)(v * invq);
+                    u32 texel = fast_dxt ? ge_dxt_cached_pixel(&dxt, tx, ty) : texture_pixel(tx, ty);
+                    if (direct_white) {
+                        color = texel;
+                        if (!(ge_state.command[GE_TEXFUNC] & 0x100))
+                            color |= 0xff000000u;
+                    } else {
+                        color = shade_pixel(texel, color);
+                    }
+                }
 
-                draw_pixel_internal(x, y, color, z, 1);
+                if (fast_target)
+                    triangle_target_pixel(&target, x, y, color, z);
+                else
+                    draw_pixel_internal(x, y, color, z, 1);
             }
 
             wa += wa_dx;

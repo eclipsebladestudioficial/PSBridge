@@ -2,6 +2,11 @@
 
 #include "ge_internal.h"
 
+static inline u32 ge_div255(u32 value)
+{
+    return (value + 1 + (value >> 8)) >> 8;
+}
+
 static u8 ge_clut[1024] __attribute__((aligned(4)));
 static u32 ge_clut_entries;
 static int ge_clut_loaded;
@@ -142,11 +147,15 @@ u32 blend_color(u32 source, u32 destination)
 
     if (src_factor == 2 && dst_factor == 3 && operation == 0) {
         u32 alpha = source >> 24;
+        if (alpha == 255)
+            return source;
+        if (alpha == 0)
+            return destination;
         u32 inverse = 255 - alpha;
-        u32 red = ((source & 0xff) * alpha + (destination & 0xff) * inverse) / 255;
-        u32 green = (((source >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse) / 255;
-        u32 blue = (((source >> 16) & 0xff) * alpha + ((destination >> 16) & 0xff) * inverse) / 255;
-        u32 output_alpha = alpha + ((destination >> 24) * inverse) / 255;
+        u32 red = ge_div255((source & 0xff) * alpha + (destination & 0xff) * inverse);
+        u32 green = ge_div255(((source >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse);
+        u32 blue = ge_div255(((source >> 16) & 0xff) * alpha + ((destination >> 16) & 0xff) * inverse);
+        u32 output_alpha = alpha + ge_div255((destination >> 24) * inverse);
         return red | (green << 8) | (blue << 16) | (output_alpha << 24);
     }
 
@@ -223,6 +232,179 @@ u32 palette_color(u32 index)
 
     return unpack_color(((const u16 *)palette)[index], format);
 }
+
+static void dxt_prepare_expanded(GeDxtSampler *sampler);
+
+int ge_dxt_setup(GeDxtSampler *sampler)
+{
+    int buffer_width;
+    sampler->format = ge_state.command[GE_TEXFORMAT] & 0xf;
+    if (sampler->format != 8 && sampler->format != 9)
+        return 0;
+    sampler->width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
+    sampler->height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
+    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+    if (!buffer_width)
+        buffer_width = sampler->width;
+    sampler->blocks_w = (buffer_width + 3) >> 2;
+    sampler->bytes = sampler->format == 8 ? 8 : 16;
+    sampler->clamp_x = ge_state.command[GE_TEXWRAP] & 1;
+    sampler->clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
+    sampler->texture = ge_pointer(buffer_address(GE_TEXADDR0, GE_TEXBUFWIDTH0));
+    sampler->block = NULL;
+    memset(sampler->cache, 0, sizeof(sampler->cache));
+    dxt_prepare_expanded(sampler);
+    return sampler->texture != NULL;
+}
+
+
+
+#define DXT_RGBA_WIDTH 512
+#define DXT_RGBA_HEIGHT 256
+#define DXT_CACHE_SLOTS 3
+#define DXT_TILE_COUNT (DXT_RGBA_WIDTH * DXT_RGBA_HEIGHT / 16)
+
+typedef struct {
+    const u8 *texture;
+    int width;
+    int height;
+    int blocks_w;
+    int bytes;
+    int format;
+    u32 checksum;
+    u32 last_epoch;
+    u32 last_used;
+    int opaque;
+    unsigned stable_epochs;
+    int expanded;
+} DxtExpanded;
+
+static u32 dxt_ready_rgba[DXT_CACHE_SLOTS][DXT_RGBA_WIDTH * DXT_RGBA_HEIGHT]
+    __attribute__((aligned(64)));
+static DxtExpanded dxt_ready_entries[DXT_CACHE_SLOTS];
+static u32 dxt_epoch = 1;
+static u32 dxt_uses;
+
+void ge_dxt_new_list(void)
+{
+    dxt_epoch++;
+}
+
+void ge_dxt_dirty(void)
+{
+    dxt_epoch++;
+}
+
+static u32 dxt_source_checksum(const u8 *source, int size)
+{
+    const u32 *words = (const u32 *)source;
+    u32 value = 2166136261u;
+    int i;
+    if (((uintptr_t)source & 3u) == 0) {
+        for (i = 0; i < size / 4; i++) {
+            value ^= words[i];
+            value *= 16777619u;
+        }
+    } else {
+        for (i = 0; i + 3 < size; i += 4) {
+            value ^= (u32)source[i] | ((u32)source[i+1] << 8) |
+                ((u32)source[i+2] << 16) | ((u32)source[i+3] << 24);
+            value *= 16777619u;
+        }
+    }
+    return value;
+}
+
+static void dxt_prepare_expanded(GeDxtSampler *sampler)
+{
+    int count, i, chosen = -1;
+    u32 oldest = 0xffffffffu;
+    DxtExpanded *entry;
+    u32 checksum;
+    int size;
+    int tx, ty, dx, dy;
+
+    sampler->ready_pixels = NULL;
+    sampler->ready_complete = 0;
+    sampler->ready_opaque = 0;
+    if (sampler->width > DXT_RGBA_WIDTH || sampler->height > DXT_RGBA_HEIGHT ||
+        sampler->width < 4 || sampler->height < 4 ||
+        sampler->blocks_w != sampler->width / 4 || !sampler->texture)
+        return;
+
+    count = (sampler->width / 4) * (sampler->height / 4);
+    if (count > DXT_TILE_COUNT)
+        return;
+
+    for (i = 0; i < DXT_CACHE_SLOTS; i++) {
+        entry = &dxt_ready_entries[i];
+        if (entry->texture == sampler->texture &&
+            entry->width == sampler->width && entry->height == sampler->height &&
+            entry->blocks_w == sampler->blocks_w &&
+            entry->bytes == sampler->bytes && entry->format == sampler->format) {
+            chosen = i;
+            break;
+        }
+        if (entry->last_used < oldest) {
+            oldest = entry->last_used;
+            chosen = i;
+        }
+    }
+    entry = &dxt_ready_entries[chosen];
+    if (entry->texture != sampler->texture || entry->width != sampler->width ||
+        entry->height != sampler->height || entry->blocks_w != sampler->blocks_w ||
+        entry->bytes != sampler->bytes || entry->format != sampler->format) {
+        entry->texture = sampler->texture;
+        entry->width = sampler->width;
+        entry->height = sampler->height;
+        entry->blocks_w = sampler->blocks_w;
+        entry->bytes = sampler->bytes;
+        entry->format = sampler->format;
+        entry->last_epoch = 0;
+        entry->checksum = 0;
+        entry->stable_epochs = 0;
+        entry->expanded = 0;
+    }
+    if (entry->last_epoch != dxt_epoch) {
+        size = count * sampler->bytes;
+        checksum = dxt_source_checksum(sampler->texture, size);
+        if (entry->checksum != checksum) {
+            entry->checksum = checksum;
+            entry->stable_epochs = 1;
+            entry->expanded = 0;
+        } else if (entry->stable_epochs < 2) {
+            entry->stable_epochs++;
+        }
+        if (!entry->expanded && entry->stable_epochs >= 2) {
+                sampler->block = NULL;
+            entry->opaque = 1;
+            memset(sampler->cache, 0, sizeof(sampler->cache));
+            for (ty = 0; ty < sampler->height; ty += 4) {
+                for (tx = 0; tx < sampler->width; tx += 4) {
+                    for (dy = 0; dy < 4; dy++) {
+                        u32 *destination = dxt_ready_rgba[chosen] +
+                            (ty + dy) * sampler->width + tx;
+                        for (dx = 0; dx < 4; dx++) {
+                            u32 color = ge_dxt_pixel(sampler, tx + dx, ty + dy);
+                            destination[dx] = color;
+                            if ((color >> 24) != 255)
+                                entry->opaque = 0;
+                        }
+                    }
+                }
+            }
+            entry->expanded = 1;
+        }
+        entry->last_epoch = dxt_epoch;
+    }
+    entry->last_used = ++dxt_uses;
+    if (entry->expanded) {
+        sampler->ready_pixels = dxt_ready_rgba[chosen];
+        sampler->ready_complete = 1;
+        sampler->ready_opaque = entry->opaque;
+    }
+}
+
 
 u32 texture_pixel(int x, int y)
 {
@@ -374,7 +556,7 @@ u32 shade_pixel(u32 texture, u32 vertex)
     if (function == 3)
         output_alpha = use_alpha ? texture_alpha : vertex_alpha;
     else if (function != 1 && use_alpha)
-        output_alpha = (texture_alpha * vertex_alpha) / 255;
+        output_alpha = ge_div255(texture_alpha * vertex_alpha);
 
     for (channel = 0; channel < 3; channel++) {
         u32 shift = channel * 8;
@@ -385,10 +567,10 @@ u32 shade_pixel(u32 texture, u32 vertex)
 
         switch (function) {
         case 1:
-            c = use_alpha ? (v * (255 - texture_alpha) + t * texture_alpha) / 255 : t;
+            c = use_alpha ? ge_div255(v * (255 - texture_alpha) + t * texture_alpha) : t;
             break;
         case 2:
-            c = (v * (255 - t) + e * t) / 255;
+            c = ge_div255(v * (255 - t) + e * t);
             break;
         case 3:
             c = t;
@@ -399,7 +581,7 @@ u32 shade_pixel(u32 texture, u32 vertex)
                 c = 255;
             break;
         default:
-            c = (v * t) / 255;
+            c = ge_div255(v * t);
             break;
         }
         result |= c << shift;
