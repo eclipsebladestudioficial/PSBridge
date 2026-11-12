@@ -20,7 +20,6 @@ extern int psbridge_memory_init(void);
 int main(void) 
 {
     sceSifInitRpc(0);
-    init_scr();
 
     PRINT_LOG("PSBridge levantou a frica\n");
     PRINT_LOG("memoria do jogo %u bytes\n", guest_info.memory_size);

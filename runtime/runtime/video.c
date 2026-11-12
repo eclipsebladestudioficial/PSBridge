@@ -175,6 +175,105 @@ static u32 framebuffer_hash(const void *ptr, int width)
     return hash;
 }
 
+int psbridge_video_frame_modified(void)
+{
+    static const void *last_pointer;
+    static u32 last_hash;
+    static u32 last_sequence;
+    static int last_width;
+    static int ready;
+    const void *source = framebuffer_pointer(framebuffer);
+    const u8 *vram = (const u8 *)psbridge_video_memory();
+    uintptr_t offset;
+    u32 hash;
+    u32 sequence;
+    int changed;
+
+    if (!source || framebuffer_format != 3 ||
+        framebuffer_width < PSP_WIDTH || framebuffer_width > 2048) {
+        ready = 0;
+        return 1;
+    }
+    if ((uintptr_t)source < (uintptr_t)vram) {
+        ready = 0;
+        return 1;
+    }
+    offset = (uintptr_t)source - (uintptr_t)vram;
+    if (offset > VIDEO_MEMORY_SIZE ||
+        (u32)framebuffer_width * PSP_HEIGHT * 4u > VIDEO_MEMORY_SIZE - offset) {
+        ready = 0;
+        return 1;
+    }
+
+    hash = framebuffer_hash(source, framebuffer_width);
+    sequence = psbridge_ge_ready_sequence();
+    changed = !ready || last_pointer != source ||
+        last_hash != hash || last_sequence != sequence ||
+        last_width != framebuffer_width;
+    ready = 1;
+    last_pointer = source;
+    last_hash = hash;
+    last_sequence = sequence;
+    last_width = framebuffer_width;
+    return changed;
+}
+
+const u32 *psbridge_video_direct_frame32(void)
+{
+    const void *source = framebuffer_pointer(framebuffer);
+    int width = framebuffer_width;
+    u32 ge_sequence = psbridge_ge_ready_sequence();
+    u32 ge_offset = psbridge_ge_ready_buffer();
+    u32 display_vblank = current_vcount();
+    u8 *vram = (u8 *)psbridge_video_memory();
+    u32 visible_offset = (u32)((uintptr_t)source - (uintptr_t)vram);
+    const void *candidate = NULL;
+    u32 candidate_hash = 0;
+    u32 current_hash = 0;
+
+    if (!source)
+        return NULL;
+
+    if (width < PSP_WIDTH || width > 2048)
+        width = PSP_BUFFER_WIDTH;
+
+    if (framebuffer_format == 3 && visible_offset <= 0x200000u - 0x88000u) {
+        current_hash = framebuffer_hash(source, width);
+        if (ge_offset <= 0x200000u - 0x88000u && ge_offset != visible_offset && ge_sequence) {
+            int known = 0;
+            int i;
+            for (i = 0; i < known_video_count; i++) {
+                if (known_video_buffers[i] == ge_offset) {
+                    known = 1;
+                    break;
+                }
+            }
+            if (known) {
+                candidate = vram + ge_offset;
+                candidate_hash = framebuffer_hash(candidate, PSP_BUFFER_WIDTH);
+            }
+        }
+        if (candidate && !auto_source_active && ge_sequence != ge_frame_seq_seen &&
+            current_hash == frame_saved_hash && candidate_hash != current_hash &&
+            display_vblank - last_display_vblank >= 12u) {
+            auto_source_active = 1;
+            auto_source_offset = ge_offset;
+                }
+        if (auto_source_active && auto_source_offset == ge_offset &&
+            display_vblank - last_display_vblank >= 12u) {
+            source = vram + auto_source_offset;
+            width = PSP_BUFFER_WIDTH;
+        }
+        frame_saved_hash = current_hash;
+        ge_frame_seq_seen = ge_sequence;
+    }
+
+    if (framebuffer_format != 3 || width != PSP_BUFFER_WIDTH ||
+        ((uintptr_t)source & 15u))
+        return NULL;
+    return (const u32 *)source;
+}
+
 void psbridge_video_render_frame(u16 *frame_pixels)
 {
     const void *source = framebuffer_pointer(framebuffer);

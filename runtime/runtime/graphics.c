@@ -15,11 +15,14 @@
 
 static GSGLOBAL *gs;
 static GSTEXTURE frame_texture;
-static u16 display_pixels[GS_OUTPUT_WIDTH * GS_OUTPUT_HEIGHT]
+static GSTEXTURE frame_texture32;
+static int texture32_ready;
+static u16 frame_pixels[PSP_BUFFER_WIDTH * PSP_HEIGHT]
     __attribute__((aligned(128)));
-#define frame_pixels display_pixels
 static int graphics_ready;
 static u32 frame_count;
+extern int psbridge_video_frame_modified(void);
+extern const u32 *psbridge_video_direct_frame32(void);
 
 int psbridge_graphics_start(void)
 {
@@ -63,7 +66,7 @@ int psbridge_graphics_start(void)
     frame_texture.Width = PSP_BUFFER_WIDTH;
     frame_texture.Height = PSP_HEIGHT;
     frame_texture.PSM = GS_PSM_CT16;
-    frame_texture.Filter = GS_FILTER_LINEAR;
+    frame_texture.Filter = GS_FILTER_NEAREST;
     frame_texture.Mem = (u32 *)frame_pixels;
 
     texture_size = gsKit_texture_size(
@@ -81,6 +84,20 @@ int psbridge_graphics_start(void)
         return -1;
 
     gsKit_setup_tbw(&frame_texture);
+    memset(&frame_texture32, 0, sizeof(frame_texture32));
+    frame_texture32.Width = PSP_BUFFER_WIDTH;
+    frame_texture32.Height = PSP_HEIGHT;
+    frame_texture32.PSM = GS_PSM_CT32;
+    frame_texture32.Filter = GS_FILTER_NEAREST;
+    frame_texture32.Vram = gsKit_vram_alloc(
+        gs,
+        gsKit_texture_size(PSP_BUFFER_WIDTH, PSP_HEIGHT, GS_PSM_CT32),
+        GSKIT_ALLOC_USERBUFFER
+    );
+    if (frame_texture32.Vram != GSKIT_ALLOC_ERROR) {
+        gsKit_setup_tbw(&frame_texture32);
+        texture32_ready = 1;
+    }
     PSB_LOG(GE, "gs vramsinha %08x tbw %u current %08x", frame_texture.Vram, frame_texture.TBW, gs->CurrentPointer);
     graphics_ready = 1;
     return 0;
@@ -88,36 +105,50 @@ int psbridge_graphics_start(void)
 
 void psbridge_graphics_present(int submitted)
 {
-    int x;
-    int y;
-
     if (psbridge_graphics_start() < 0)
         return;
 
-    psbridge_video_render_frame(frame_pixels);
-    psbridge_video_log_frame(++frame_count);
-    FlushCache(0);
-
-    for (y = GS_OUTPUT_HEIGHT - 1; y >= 0; y--) {
-        const u16 *src = frame_pixels +
-            (y * PSP_HEIGHT / GS_OUTPUT_HEIGHT) * PSP_BUFFER_WIDTH;
-        u16 *dst = display_pixels + y * GS_OUTPUT_WIDTH;
-
-        for (x = GS_OUTPUT_WIDTH - 1; x >= 0; x--)
-            dst[x] = src[x * PSP_WIDTH / GS_OUTPUT_WIDTH];
+    if (!submitted) {
+        static u32 idle;
+        if (!psbridge_video_frame_modified() && ++idle < 24)
+            return;
+        idle = 0;
+    } else {
+        psbridge_video_frame_modified();
     }
 
-    FlushCache(0);
-
-    gsKit_texture_send(
-        (u32 *)((uintptr_t)display_pixels & 0x1fffffff),
-        GS_OUTPUT_WIDTH,
-        GS_OUTPUT_HEIGHT,
-        gs->ScreenBuffer[0],
-        GS_PSM_CT16,
-        GS_OUTPUT_WIDTH / 64,
-        0
+    const u32 *direct = texture32_ready ? psbridge_video_direct_frame32() : NULL;
+    const GSTEXTURE *texture = &frame_texture;
+    if (direct) {
+        FlushCache(0);
+        gsKit_texture_send_inline(
+            gs,
+            (u32 *)((uintptr_t)direct & 0x1fffffff),
+            PSP_BUFFER_WIDTH, PSP_HEIGHT, frame_texture32.Vram,
+            GS_PSM_CT32, frame_texture32.TBW, 0
+        );
+        texture = &frame_texture32;
+    } else {
+        psbridge_video_render_frame(frame_pixels);
+        FlushCache(0);
+        gsKit_texture_send_inline(
+            gs,
+            (u32 *)((uintptr_t)frame_pixels & 0x1fffffff),
+            PSP_BUFFER_WIDTH, PSP_HEIGHT, frame_texture.Vram,
+            GS_PSM_CT16, frame_texture.TBW, 0
+        );
+    }
+    psbridge_video_log_frame(++frame_count);
+    gsKit_prim_sprite_texture_3d(
+        gs,
+        texture,
+        0.0f, 0.0f, 1, 0.0f, 0.0f,
+        (float)GS_OUTPUT_WIDTH, (float)GS_OUTPUT_HEIGHT, 1,
+        (float)PSP_WIDTH, (float)PSP_HEIGHT,
+        GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0)
     );
+    gsKit_queue_exec(gs);
+    gsKit_queue_reset(gs->Os_Queue);
     if (submitted)
         gsKit_display_buffer(gs);
 }
