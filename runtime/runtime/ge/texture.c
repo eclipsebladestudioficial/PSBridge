@@ -259,9 +259,9 @@ int ge_dxt_setup(GeDxtSampler *sampler)
 
 
 
-#define DXT_RGBA_WIDTH 512
-#define DXT_RGBA_HEIGHT 256
-#define DXT_CACHE_SLOTS 3
+#define DXT_RGBA_WIDTH 64
+#define DXT_RGBA_HEIGHT 64
+#define DXT_CACHE_SLOTS 1
 #define DXT_TILE_COUNT (DXT_RGBA_WIDTH * DXT_RGBA_HEIGHT / 16)
 
 typedef struct {
