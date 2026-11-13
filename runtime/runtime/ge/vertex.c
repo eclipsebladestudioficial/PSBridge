@@ -150,7 +150,9 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
     } else if (position == 2) {
         vertex.x = *(const s16 *)(data + layout.position);
         vertex.y = *(const s16 *)(data + layout.position + 2);
-        vertex.z = *(const s16 *)(data + layout.position + 4);
+        vertex.z = (type & (1u << 23))
+            ? *(const u16 *)(data + layout.position + 4)
+            : *(const s16 *)(data + layout.position + 4);
     } else if (position == 3) {
         vertex.x = *(const float *)(data + layout.position);
         vertex.y = *(const float *)(data + layout.position + 4);
