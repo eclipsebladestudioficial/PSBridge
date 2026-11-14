@@ -102,6 +102,7 @@ typedef struct {
     u32 vertex_address;
     u32 index_address;
     u32 offset_address;
+    u32 primitive_pc;
     float texture_u;
     float texture_v;
 } GeState;
@@ -113,6 +114,7 @@ typedef struct {
     int normal;
     int position;
     int stride;
+    int target_stride;
 } VertexLayout;
 
 typedef struct {

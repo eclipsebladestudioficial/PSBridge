@@ -1,4 +1,5 @@
 #include <string.h>
+#include <math.h>
 
 #include "ge_internal.h"
 
@@ -1038,7 +1039,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 {
     TrianglePalette fast;
     GeDxtSampler dxt;
-    TriangleTarget target;
+    TriangleTarget target = {0};
     int fast_target;
     int fast_dxt;
     int affine;
@@ -1567,72 +1568,120 @@ static GeVertex clip_vertex(GeVertex a, GeVertex b, float t)
     return out;
 }
 
-static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type)
+static int ge3d_emit_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, int flip)
 {
-    GeVertex first[10];
-    GeVertex second[10];
-    GeVertex *input = first;
-    GeVertex *output = second;
+    float area = edge(a, b, c.x, c.y);
+    (void)type;
+    int enabled = (ge_state.command[0x1d] & 1u) &&
+        !(ge_state.command[GE_CLEARMODE] & 1u);
+    int winding = ge_state.command[0x9b] & 1u;
+    int visible = !enabled || !area ||
+        (((area > 0.0f) ^ !!flip) == !winding);
+
+    if (visible)
+        draw_triangle(a, b, c);
+    return visible;
+}
+
+static int ge3d_outside_screen(GeVertex v, const u32 *commands)
+{
+    float x = v.x + (float)(commands[GE_OFFSETX] & 0xffffu) * (1.0f / 16.0f);
+    float y = v.y + (float)(commands[GE_OFFSETY] & 0xffffu) * (1.0f / 16.0f);
+
+    return !isfinite(x) || !isfinite(y) || x < 0.0f || y < 0.0f ||
+        x >= 4096.0f || y >= 4096.0f;
+}
+
+static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, int flip)
+{
+    GeVertex polygon[5];
+    GeVertex clipped[5];
     int count = 3;
+    int clipping_enabled = ge_state.command[0x1c] & 1u;
     int plane;
     int i;
+    int outside_near = 0;
 
     if (type & (1u << 23)) {
-        draw_triangle(a, b, c);
+        ge3d_emit_triangle(a, b, c, type, flip);
         return;
     }
 
-    first[0] = a;
-    first[1] = b;
-    first[2] = c;
+    if (!isfinite(a.clip_x) || !isfinite(a.clip_y) || !isfinite(a.clip_z) || !isfinite(a.clip_w) ||
+        !isfinite(b.clip_x) || !isfinite(b.clip_y) || !isfinite(b.clip_z) || !isfinite(b.clip_w) ||
+        !isfinite(c.clip_x) || !isfinite(c.clip_y) || !isfinite(c.clip_z) || !isfinite(c.clip_w)) {
+        return;
+    }
 
-    for (plane = 0; plane < 6 && count; plane++) {
+    for (plane = 0; plane < 6; plane++) {
+        if (clip_distance(a, plane) < 0.0f &&
+            clip_distance(b, plane) < 0.0f &&
+            clip_distance(c, plane) < 0.0f) {
+            return;
+        }
+    }
+
+    if (!clipping_enabled && (a.clip_w <= 0.0f || b.clip_w <= 0.0f || c.clip_w <= 0.0f)) {
+        return;
+    }
+
+    polygon[0] = a;
+    polygon[1] = b;
+    polygon[2] = c;
+    if (clip_distance(a, 4) < 0.0f) outside_near++;
+    if (clip_distance(b, 4) < 0.0f) outside_near++;
+    if (clip_distance(c, 4) < 0.0f) outside_near++;
+
+    if (clipping_enabled && outside_near) {
         int output_count = 0;
-        GeVertex previous = input[count - 1];
-        float previous_distance = clip_distance(previous, plane);
+        GeVertex previous = polygon[2];
+        float previous_distance = clip_distance(previous, 4);
         int previous_inside = previous_distance >= 0.0f;
 
-        for (i = 0; i < count; i++) {
-            GeVertex current = input[i];
-            float current_distance = clip_distance(current, plane);
+        for (i = 0; i < 3; i++) {
+            GeVertex current = polygon[i];
+            float current_distance = clip_distance(current, 4);
             int current_inside = current_distance >= 0.0f;
 
             if (current_inside != previous_inside) {
-                float t = previous_distance /
-                    (previous_distance - current_distance);
-                output[output_count++] = clip_vertex(previous, current, t);
+                float t = previous_distance / (previous_distance - current_distance);
+                clipped[output_count++] = clip_vertex(previous, current, t);
             }
             if (current_inside)
-                output[output_count++] = current;
+                clipped[output_count++] = current;
 
             previous = current;
             previous_distance = current_distance;
             previous_inside = current_inside;
         }
-
         count = output_count;
-        {
-            GeVertex *swap = input;
-            input = output;
-            output = swap;
+        for (i = 0; i < count; i++)
+            polygon[i] = clipped[i];
+    }
+
+    if (!count)
+        return;
+    for (i = 0; i < count; i++) {
+        if (!ge3d_project_vertex(&polygon[i], ge_state.command)) {
+            return;
+        }
+        if (ge3d_outside_screen(polygon[i], ge_state.command)) {
+            return;
+        }
+        if (clipping_enabled) {
+            if (polygon[i].z < 0.0f) polygon[i].z = 0.0f;
+            if (polygon[i].z > 65535.0f) polygon[i].z = 65535.0f;
+        } else if (polygon[i].z < 0.0f || polygon[i].z >= 65536.0f) {
+            return;
         }
     }
 
-    for (i = 1; i + 1 < count; i++) {
-        GeVertex v0 = input[0];
-        GeVertex v1 = input[i];
-        GeVertex v2 = input[i + 1];
-
-        if (ge3d_project_vertex(&v0, ge_state.command) &&
-            ge3d_project_vertex(&v1, ge_state.command) &&
-            ge3d_project_vertex(&v2, ge_state.command))
-            draw_triangle(v0, v1, v2);
-    }
+    for (i = 1; i + 1 < count; i++)
+        ge3d_emit_triangle(polygon[0], polygon[i], polygon[i + 1], type, flip);
 }
 
 void draw_primitive(u32 argument)
 {
-    static int primitive_depth_logs;
     u32 type = ge_state.command[GE_VERTEXTYPE];
     int primitive = argument >> 16;
     int count = argument & 0xffff;
@@ -1643,19 +1692,6 @@ void draw_primitive(u32 argument)
         return;
 
     layout = vertex_layout(type);
-    if (!(type & (1u << 23)) &&
-        ((ge_state.command[GE_DEPTH_TEST_ENABLE] & 1) ||
-        (type & 0x00000e60)) && primitive_depth_logs < 48) {
-        ge3d_log_matrices();
-        primitive_depth_logs++;
-        PRINT_3D_LOG("mapa 3d mandou a geometria tipo %08x bicho %d quantidade %d passo %d textura %u formato %u z %u teste %u endereco %08x indice %08x\n",
-            type, primitive, count, layout.stride,
-            ge_state.command[GE_TEXTURE_ENABLE] & 1,
-            ge_state.command[GE_TEXFORMAT] & 0xf,
-            ge_state.command[GE_DEPTH_TEST_ENABLE] & 1,
-            ge_state.command[GE_DEPTHTEST] & 7,
-            ge_state.vertex_address, ge_state.index_address);
-    }
     if (primitive == 6) {
         for (index = 0; index + 1 < count; index += 2)
             draw_sprite(
@@ -1671,7 +1707,7 @@ void draw_primitive(u32 argument)
                 read_vertex(index, type, layout),
                 read_vertex(index + 1, type, layout),
                 read_vertex(index + 2, type, layout),
-                type
+                type, 0
             );
         return;
     }
@@ -1682,7 +1718,7 @@ void draw_primitive(u32 argument)
                 read_vertex(index, type, layout),
                 read_vertex(index + 1, type, layout),
                 read_vertex(index + 2, type, layout),
-                type
+                type, index & 1
             );
         return;
     }
@@ -1695,7 +1731,7 @@ void draw_primitive(u32 argument)
                 first,
                 read_vertex(index, type, layout),
                 read_vertex(index + 1, type, layout),
-                type
+                type, 0
             );
     }
 }

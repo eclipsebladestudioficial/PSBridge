@@ -66,7 +66,7 @@ void vfpu_read_prefix(int r, int n, float out[4], u32 p, int active)
     for (i = 0; i < n; i++)
     {
         int src = (p >> (i * 2)) & 3;
-        float v = original[src < n ? src : 0];
+        float v = original[src];
         if (p & (1u << (12 + i)))
         {
             static const float constants[8] = {0.0f, 1.0f,        2.0f,  0.5f,
@@ -113,6 +113,12 @@ void vfpu_write_vector(int r, int n, const float in[4], int use_prefix)
 void vfpu_finish_prefix(void)
 {
     vfpu_have_s = vfpu_have_t = vfpu_have_d = 0;
+    vfpu_prefix_s = 0xe4u;
+    vfpu_prefix_t = 0xe4u;
+    vfpu_prefix_d = 0;
+    vfpu_ctrl[0] = 0xe4u;
+    vfpu_ctrl[1] = 0xe4u;
+    vfpu_ctrl[2] = 0;
 }
 
 void vfpu_matrix_read(int r, int n, float mat[4][4])

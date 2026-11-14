@@ -1,7 +1,7 @@
 #include <stdint.h>
+#include <math.h>
 
 #include "ge3d.h"
-#include "psbridge_log.h"
 
 #define GE_WORLDMATRIXNUMBER 0x3a
 #define GE_WORLDMATRIXDATA 0x3b
@@ -29,37 +29,44 @@ static float ge_projection[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1
 static u32 ge_world_index;
 static u32 ge_view_index;
 static u32 ge_projection_index;
-
-void ge3d_log_matrices(void)
+static float ge_bones[8][12] = {
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0},
+    {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0}
+};
+static float ge_morph[8] = {1, 0, 0, 0, 0, 0, 0, 0};
+static u32 ge_bone_index;
+float ge3d_morph_weight(int index)
 {
-    static int logged;
-    int i;
-
-    if (logged)
-        return;
-    logged = 1;
-    for (i = 0; i < 12; i += 3)
-        PRINT_3D_LOG("matriz world meteu linha %d %.6f %.6f %.6f\n", i / 3,
-            ge_world[i], ge_world[i + 1], ge_world[i + 2]);
-    for (i = 0; i < 12; i += 3)
-        PRINT_3D_LOG("matriz view meteu linha %d %.6f %.6f %.6f\n", i / 3,
-            ge_view[i], ge_view[i + 1], ge_view[i + 2]);
-    for (i = 0; i < 16; i += 4)
-        PRINT_3D_LOG("matriz proj meteu linha %d %.6f %.6f %.6f %.6f\n", i / 4,
-            ge_projection[i], ge_projection[i + 1],
-            ge_projection[i + 2], ge_projection[i + 3]);
+    return index >= 0 && index < 8 ? ge_morph[index] : 0.0f;
 }
 
 static void ge3d_skinning_command(u32 command, u32 value)
 {
-    (void)command;
-    (void)value;
+    if (command == 0x2a) {
+        ge_bone_index = value & 127u;
+    } else {
+        u32 index = ge_bone_index;
+        if (index < 96u) {
+            union { u32 bits; float f; } converted;
+            converted.bits = value << 8;
+            ge_bones[index / 12u][index % 12u] = converted.f;
+        }
+        ge_bone_index = (index + 1u) & 127u;
+    }
 }
 
 static void ge3d_morph_command(u32 command, u32 value)
 {
-    (void)command;
-    (void)value;
+    union { u32 bits; float f; } converted;
+    u32 index = command - 0x2cu;
+    converted.bits = value << 8;
+    ge_morph[index] = converted.f;
 }
 
 static void ge3d_patch_command(u32 command, u32 value)
@@ -199,7 +206,9 @@ int ge3d_project_vertex(GeVertex *v, const u32 *commands)
     float oy = ge3d_float(commands[GE_VIEWPORTYCENTER]);
     float oz = ge3d_float(commands[GE_VIEWPORTZCENTER]);
 
-    if (v->clip_w == 0.0f)
+    if (!isfinite(v->clip_x) || !isfinite(v->clip_y) ||
+        !isfinite(v->clip_z) || !isfinite(v->clip_w) ||
+        fabsf(v->clip_w) < 0.0000001f)
         return 0;
 
     v->inv_w = 1.0f / v->clip_w;
@@ -213,7 +222,8 @@ int ge3d_project_vertex(GeVertex *v, const u32 *commands)
         v->y > -10000.0f && v->y < 10000.0f;
 }
 
-void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
+void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands,
+    const float *weights, int weight_count)
 {
     float x, y, z, wx, wy, wz, vx, vy, vz;
 
@@ -238,6 +248,26 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands)
         x *= 1.0f / 32768.0f;
         y *= 1.0f / 32768.0f;
         z *= 1.0f / 32768.0f;
+    }
+
+    if (weight_count > 0 && weights) {
+        float sx = 0.0f;
+        float sy = 0.0f;
+        float sz = 0.0f;
+        int i;
+
+        for (i = 0; i < weight_count && i < 8; i++) {
+            const float *bone = ge_bones[i];
+            float weight = weights[i];
+            if (weight == 0.0f)
+                continue;
+            sx += weight * (x * bone[0] + y * bone[3] + z * bone[6] + bone[9]);
+            sy += weight * (x * bone[1] + y * bone[4] + z * bone[7] + bone[10]);
+            sz += weight * (x * bone[2] + y * bone[5] + z * bone[8] + bone[11]);
+        }
+        x = sx;
+        y = sy;
+        z = sz;
     }
 
     wx = x * ge_world[0] + y * ge_world[3] + z * ge_world[6] + ge_world[9];

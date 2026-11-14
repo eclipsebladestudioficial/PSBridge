@@ -6,7 +6,7 @@ import sys
 import mmap
 from pathlib import Path
 
-from allegrex import branch_names, decode, target_of
+from allegrex import branch_names, vfpu_branches, decode, target_of
 from analyze import find_callbacks, find_jump_tables, output_register
 from elf_reader import read_code, read_header, read_segments, read_word
 from module_sexytion import add_image, add_info, add_map, add_overlay_map, write_map
@@ -190,6 +190,11 @@ def emit_instruction(
     guest_size,
     lower_address=None,
 ):
+    if address == 0x0057d954:
+        if instruction != ("or", 4, 4, 2):
+            raise ValueError("instrução inesperada no fix de alias PSP 0x0057d954")
+        return ["or $4, $4, $0"]
+
     target = references["high"].get(address)
 
     if target is not None:
@@ -231,7 +236,7 @@ def emit_instruction(
                 f"addiu ${register}, ${register}, %lo({image})",
             ]
 
-    return emit(instruction, label, lower_address or address)
+    return emit(instruction, label, address if instruction[0] == "vfpu_call" else (lower_address or address))
 
 
 def add_line(lines, line):
@@ -447,7 +452,7 @@ def recompile(input_path, output_path):
         delay = code.get(address + 4)
         delay_lines = emit_at(address + 4, delay) if delay else []
 
-        if instruction[0] in branch_names and len(delay_lines) > 1:
+        if instruction[0] in branch_names and (len(delay_lines) > 1 or instruction[0] in vfpu_branches):
             add_branch_with_long_delay(
                 lines,
                 address,
@@ -515,7 +520,7 @@ def recompile(input_path, output_path):
             delay = overlay_code.get(address + 4)
             delay_lines = emit_overlay_at(address + 4, delay) if delay else []
 
-            if instruction[0] in branch_names and len(delay_lines) > 1:
+            if instruction[0] in branch_names and (len(delay_lines) > 1 or instruction[0] in vfpu_branches):
                 add_branch_with_long_delay(
                     lines,
                     address,

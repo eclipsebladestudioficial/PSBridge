@@ -31,14 +31,14 @@ psbridge_vfpu_entry:
     sw $21, 148($sp)
     sw $22, 152($sp)
     sw $23, 156($sp)
-    sw $24, 160($sp)
-    sw $25, 164($sp)
     lw $8, 384($sp)
-    sw $8, 168($sp)
+    sw $8, 160($sp)
     lw $8, 388($sp)
-    sw $8, 172($sp)
+    sw $8, 164($sp)
+    sw $26, 168($sp)
+    sw $27, 172($sp)
     sw $28, 176($sp)
-    addiu $8, $sp, 400
+    addiu $8, $sp, 416
     sw $8, 180($sp)
     sw $30, 184($sp)
     lw $8, 392($sp)
@@ -91,8 +91,8 @@ psbridge_vfpu_entry:
     cfc1 $8, $31
     sw $8, 336($sp)
 
-    lw $4, 344($sp)
-    lw $5, 348($sp)
+    lw $4, 396($sp)
+    lw $5, 400($sp)
     addiu $6, $sp, 64
 
     lui $gp, %hi(_gp)

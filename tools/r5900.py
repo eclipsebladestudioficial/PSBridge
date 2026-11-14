@@ -1,4 +1,4 @@
-from allegrex import float_branches, one_reg_branches, two_reg_branches
+from allegrex import float_branches, one_reg_branches, two_reg_branches, vfpu_branches
 
 
 def reg(index):
@@ -47,18 +47,19 @@ def resolve_jump(source):
 
 def emit_vfpu_dispatch(opcode, address):
     return [
-        "addiu $sp, $sp, -16",
-        "sw $26, 0($sp)",
-        "sw $27, 4($sp)",
+        "addiu $sp, $sp, -32",
+        "sw $24, 0($sp)",
+        "sw $25, 4($sp)",
         "sw $31, 8($sp)",
-        *load_value(26, opcode),
-        *load_value(27, address & 0xffffffff),
+        "sw $27, 20($sp)",
+        *load_value(24, opcode),
+        "sw $24, 12($sp)",
+        *load_value(25, address & 0xffffffff),
+        "sw $25, 16($sp)",
         "jal psbridge_vfpu_entry",
         "nop",
-        "lw $26, 0($sp)",
-        "lw $27, 4($sp)",
-        "lw $31, 8($sp)",
-        "addiu $sp, $sp, 16"
+        "lw $27, 20($sp)",
+        "addiu $sp, $sp, 32"
     ]
 
 
@@ -403,6 +404,21 @@ def emit(instruction, label, address):
         return setup + [f"{name} {reg(rs)}, {label(target)}"]
     if name in float_branches:
         return [f"{name} {label(instruction[1])}"]
+    if name in vfpu_branches:
+        _, cc, target = instruction
+        jump = "bne" if name in ("bvt", "bvtl") else "beq"
+        return [
+            "addiu $sp, $sp, -16",
+            "sw $1, 0($sp)",
+            "sw $26, 4($sp)",
+            "lui $26, %hi(vfpu_ctrl + 12)",
+            "lw $1, %lo(vfpu_ctrl + 12)($26)",
+            "lw $26, 4($sp)",
+            "addiu $sp, $sp, 16",
+            f"andi $1, $1, {1 << cc}",
+            f"{jump} $1, $0, {label(target)}",
+            "lw $1, -16($sp)",
+        ]
 
     if name in ("addi", "addiu", "slti", "sltiu", "andi", "ori", "xori"):
         _, rt, rs, value = instruction

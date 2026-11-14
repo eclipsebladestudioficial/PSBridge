@@ -19,8 +19,9 @@ typedef struct {
 
 void ge3d_matrix_command(u32 command, u32 value);
 void ge3d_command(u32 command, u32 value);
-void ge3d_transform_vertex(GeVertex *vertex, u32 type, const u32 *commands);
+float ge3d_morph_weight(int index);
+void ge3d_transform_vertex(GeVertex *vertex, u32 type, const u32 *commands,
+    const float *weights, int weight_count);
 int ge3d_project_vertex(GeVertex *vertex, const u32 *commands);
-void ge3d_log_matrices(void);
 
 #endif

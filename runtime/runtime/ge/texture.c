@@ -8,7 +8,7 @@ static inline u32 ge_div255(u32 value)
 }
 
 static u8 ge_clut[1024] __attribute__((aligned(4)));
-static u32 ge_clut_entries;
+static u32 ge_clut_bytes;
 static int ge_clut_loaded;
 
 static u32 unpack_dxt_color(u16 color)
@@ -186,21 +186,20 @@ u32 blend_color(u32 source, u32 destination)
 
 void load_clut(u32 argument)
 {
-    u32 format = ge_state.command[GE_CLUTFORMAT] & 3;
-    u32 entries = (argument & 0x3f) * 8;
-    u32 bytes_per_entry = format == 3 ? 4 : 2;
+    u32 bytes = (argument & 0x3f) * 32;
     u32 address =
         (ge_state.command[GE_CLUTADDR] & 0x00fffff0) |
         ((ge_state.command[GE_CLUTADDRUPPER] << 8) & 0x0f000000);
     const void *source = ge_pointer(address);
 
-    if (entries > 256)
-        entries = 256;
-    if (!source || !entries)
+    if (bytes > sizeof(ge_clut))
+        bytes = sizeof(ge_clut);
+    if (!source || !bytes)
         return;
 
-    memcpy(ge_clut, source, entries * bytes_per_entry);
-    ge_clut_entries = entries;
+    memcpy(ge_clut, source, bytes);
+    if (bytes > ge_clut_bytes)
+        ge_clut_bytes = bytes;
     ge_clut_loaded = 1;
 }
 
@@ -213,9 +212,9 @@ u32 palette_color(u32 index)
     u32 address;
     const void *palette;
 
-    index = (((index >> shift) & mask) | start) & 0xff;
+    index = (((index >> shift) & mask) | start) & (format == 3 ? 0xffu : 0x1ffu);
     if (ge_clut_loaded) {
-        if (index >= ge_clut_entries)
+        if ((index + 1u) * (format == 3 ? 4u : 2u) > ge_clut_bytes)
             return 0;
         palette = ge_clut;
     } else {

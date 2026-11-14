@@ -14,7 +14,8 @@ one_reg_branches = (
     "blez", "bgtz", "blezl", "bgtzl",
 )
 float_branches = ("bc1f", "bc1t", "bc1fl", "bc1tl")
-branch_names = two_reg_branches + one_reg_branches + float_branches
+vfpu_branches = ("bvf", "bvt", "bvfl", "bvtl")
+branch_names = two_reg_branches + one_reg_branches + float_branches + vfpu_branches
 
 
 def reg(index):
@@ -193,6 +194,9 @@ def decode(address, word):
     if op == 0x1f and funct == 4:
         return "ins", rt, rs, shift, rd - shift + 1
 
+    if op == 0x12 and rs == 8 and (rt & 3) in (0, 1, 2, 3) and (rt & 0xe0) == 0:
+        return vfpu_branches[rt & 3], (word >> 18) & 7, branch_target(address, value)
+
     vfpu_name = identify_vfpu(word)
     if vfpu_name is not None:
         return "vfpu_call", word, vfpu_name
@@ -205,6 +209,8 @@ def target_of(instruction):
     if name in ("j", "jal") + float_branches:
         return instruction[1]
     if name in one_reg_branches:
+        return instruction[2]
+    if name in vfpu_branches:
         return instruction[2]
     if name in two_reg_branches:
         return instruction[3]
@@ -253,6 +259,9 @@ def format_instruction(instruction):
     if name in one_reg_branches:
         _, rs, target = instruction
         return f"{name} {reg(rs)}, 0x{target:08x}"
+    if name in vfpu_branches:
+        _, cc, target = instruction
+        return f"{name} {cc}, 0x{target:08x}"
     if name in float_branches:
         return f"{name} 0x{instruction[1]:08x}"
 

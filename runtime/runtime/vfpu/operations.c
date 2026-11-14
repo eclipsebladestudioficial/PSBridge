@@ -1,5 +1,4 @@
 #include "vfpu_internal.h"
-#include "psbridge_log.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,12 +21,34 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
             {
                 psbridge_mixer_sp = sp;
                 psbridge_mixer_pointer = ptr;
-                PSB_LOG(VFPU, "vfpu cheirou a pilha %08lx e a mulher dj tava %08lx",
-                        (unsigned long)sp, (unsigned long)ptr);
             }
         }
     }
 
+    if (major == 53 || major == 61)
+    {
+        int base = (op >> 21) & 31;
+        int reg = ((op >> 16) & 31) | ((op & 1) << 5);
+        int offset = (int)(short)(op & 0xfffc);
+        u32 addr = gpr[base] + offset;
+        int part = (addr >> 2) & 3;
+        int left = !(op & 2);
+        int first = left ? 3 - part : 0;
+        int count = left ? part + 1 : 4 - part;
+        for (i = 0; i < count; i++)
+        {
+            int lane = first + i;
+            u32 address = left ? addr - (u32)(4 * (count - 1 - i)) : addr + (u32)(4 * i);
+            u32 *ptr = vfpu_checked_pointer(address, 4);
+            if (!ptr)
+                return;
+            if (major == 53)
+                vfpu_vr[vfpu_vector_lane(reg, 4, lane)] = *ptr;
+            else
+                *ptr = vfpu_vr[vfpu_vector_lane(reg, 4, lane)];
+        }
+        return;
+    }
     if (major == 50 || major == 54 || major == 58 || major == 62)
     {
         int base = (op >> 21) & 31;
@@ -36,13 +57,8 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
         int offset = (int)(short)(op & 0xfffc);
         u32 addr = gpr[base] + offset;
         u32 *p = (u32 *)vfpu_checked_pointer(addr, n * 4);
-        if (!p) {
-            static u32 failed;
-            if (failed++ < 12)
-                PRINT_LOG("vfpu enderecou errado pc %08x op %08x reg %d valor %08x offset %d alvo %08x\n",
-                    pc, op, base, gpr[base], offset, addr);
+        if (!p)
             return;
-        }
         for (i = 0; i < n; i++)
         {
             int r = vfpu_vector_lane(reg, n, i);
@@ -101,13 +117,42 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
         int rt = (op >> 16) & 31, control = (op & 0x80) != 0, idx = op & 127;
         if ((op & 0xffe00000) == 0x48600000)
         {
-            if (rt)
-                gpr[rt] = control ? vfpu_ctrl[idx & 15] : vfpu_vr[vfpu_vector_lane(idx, 1, 0)];
+            if (rt && (!control || idx < 16))
+                gpr[rt] = control ? vfpu_ctrl[idx] : vfpu_vr[vfpu_vector_lane(idx, 1, 0)];
         }
         else
         {
             if (control)
-                vfpu_ctrl[idx & 15] = gpr[rt];
+            {
+                u32 value = gpr[rt];
+                if (idx <= 1)
+                {
+                    value &= 0x000fffffu;
+                    vfpu_ctrl[idx] = value;
+                    if (idx == 0)
+                    {
+                        vfpu_prefix_s = value;
+                        vfpu_have_s = 1;
+                    }
+                    else
+                    {
+                        vfpu_prefix_t = value;
+                        vfpu_have_t = 1;
+                    }
+                }
+                else if (idx == 2)
+                {
+                    vfpu_prefix_d = value & 0xfffu;
+                    vfpu_ctrl[2] = vfpu_prefix_d;
+                    vfpu_have_d = 1;
+                }
+                else if (idx == 3)
+                    vfpu_ctrl[3] = value & 0x3fu;
+                else if (idx == 4)
+                    vfpu_ctrl[4] = value;
+                else if (idx >= 8 && idx <= 15)
+                    vfpu_ctrl[idx] = (value & 0xfffffu) | 0x3f800000u;
+            }
             else
                 vfpu_vr[vfpu_vector_lane(idx, 1, 0)] = gpr[rt];
         }
@@ -151,8 +196,28 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
             }
             else if (subgroup == 2)
             {
+                float scalar[4] = {0};
+                static const float constants[8] = {
+                    0.0f, 1.0f, 2.0f, 0.5f,
+                    3.0f, 1.0f / 3.0f, 0.25f, 1.0f / 6.0f
+                };
+                vfpu_read_vector(vt, 1, scalar);
                 for (i = 0; i < size; i++)
-                    d[i] = s[i] * t[0];
+                {
+                    float scale = scalar[0];
+                    if (vfpu_have_t)
+                    {
+                        int swizzle = (vfpu_prefix_t >> (i * 2)) & 3;
+                        int absolute = (vfpu_prefix_t >> (8 + i)) & 1;
+                        if (vfpu_prefix_t & (1u << (12 + i)))
+                            scale = constants[swizzle + (absolute << 2)];
+                        else if (absolute)
+                            scale = fabsf(scale);
+                        if (vfpu_prefix_t & (1u << (16 + i)))
+                            scale = -scale;
+                    }
+                    d[i] = s[i] * scale;
+                }
             }
             else if (subgroup == 4)
             {
@@ -215,31 +280,36 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
                         hit = s[i] == 0;
                         break;
                     case 9:
-                        hit = s[i] != 0;
-                        break;
-                    case 10:
-                        hit = s[i] < 0;
-                        break;
-                    case 11:
-                        hit = s[i] >= 0;
-                        break;
-                    case 12:
-                        hit = isinf(s[i]) || isnan(s[i]);
-                        break;
-                    case 13:
-                        hit = isfinite(s[i]);
-                        break;
-                    case 14:
                         hit = isnan(s[i]);
                         break;
-                    case 15:
+                    case 10:
+                        hit = isinf(s[i]);
+                        break;
+                    case 11:
+                        hit = isnan(s[i]) || isinf(s[i]);
+                        break;
+                    case 12:
+                        hit = s[i] != 0.0f;
+                        break;
+                    case 13:
                         hit = !isnan(s[i]);
+                        break;
+                    case 14:
+                        hit = !isinf(s[i]);
+                        break;
+                    case 15:
+                        hit = !isnan(s[i]) && !isinf(s[i]);
                         break;
                     }
                     cc |= (hit ? 1u : 0u) << i;
                 }
-                vfpu_ctrl[3] = cc | ((cc & ((1u << size) - 1)) ? 0x10 : 0) |
-                          ((cc & ((1u << size) - 1)) == ((1u << size) - 1) ? 0x20 : 0);
+                {
+                    u32 mask = ((1u << size) - 1u) | 0x30u;
+                    u32 previous = vfpu_ctrl[3];
+                    u32 current = cc | ((cc & ((1u << size) - 1u)) ? 0x10u : 0u) |
+                        ((cc & ((1u << size) - 1u)) == ((1u << size) - 1u) ? 0x20u : 0u);
+                    vfpu_ctrl[3] = (previous & ~mask) | (current & mask);
+                }
                 vfpu_finish_prefix();
                 return;
             }
@@ -440,12 +510,15 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
         else if (kind == 5)
         {
             int bit = (op >> 16) & 7;
-            int truth = (bit < 6) ? ((vfpu_ctrl[3] >> bit) & 1) : ((vfpu_ctrl[3] >> 4) & 1);
             int move_when_false = (op & 0x00080000) != 0;
             float previous[4] = {0};
-            vfpu_read_vector(vd, size, previous);
+            vfpu_read_prefix(vd, size, previous, vfpu_prefix_t, vfpu_have_t);
             for (i = 0; i < size; i++)
-                d[i] = (truth ^ move_when_false) ? s[i] : previous[i];
+            {
+                int cond = bit == 6 ? ((vfpu_ctrl[3] >> i) & 1) :
+                    bit == 7 ? 0 : ((vfpu_ctrl[3] >> bit) & 1);
+                d[i] = cond == !move_when_false ? s[i] : previous[i];
+            }
             vfpu_write_vector(vd, size, d, 1);
         }
         else
@@ -485,16 +558,28 @@ void psbridge_vfpu_dispatch(u32 op, u32 pc, u32 *gpr)
             int sin_lane = (imm >> 2) & 3;
             int cos_lane = imm & 3;
             float angle[4] = {0};
+            float original[4] = {0};
             float si, co;
+            vfpu_read_vector(vs, 1, original);
             vfpu_read_prefix(vs, 1, angle, vfpu_prefix_s, vfpu_have_s);
             si = sinf(angle[0] * 1.5707963267948966f);
-            co = cosf(angle[0] * 1.5707963267948966f);
+            co = cosf(original[0] * 1.5707963267948966f);
             if (imm & 16)
                 si = -si;
             for (i = 0; i < size; i++)
                 d[i] = (sin_lane == cos_lane || i == sin_lane) ? si : 0.0f;
+            for (i = 0; i < size; i++)
+                if (vfpu_vector_lane(vd, size, i) == vfpu_vector_lane(vs, 1, 0))
+                {
+                    co = cosf(d[i] * 1.5707963267948966f);
+                    break;
+                }
             if (cos_lane < size)
                 d[cos_lane] = co;
+            if (vfpu_have_d && cos_lane < size)
+            {
+                vfpu_prefix_d &= ~((3u << (cos_lane * 2)) | (1u << (8 + cos_lane)));
+            }
             vfpu_write_vector(vd, size, d, 1);
             vfpu_finish_prefix();
             return;
