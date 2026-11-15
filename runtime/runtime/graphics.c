@@ -51,8 +51,8 @@ int psbridge_graphics_start(void)
     gs->Field = GS_FIELD;
     gs->Width = 640;
     gs->Height = 448;
-    gs->PSM = GS_PSM_CT16;
-    gs->PSMZ = GS_PSMZ_16S;
+    gs->PSM = GS_PSM_CT32;
+    gs->PSMZ = GS_PSMZ_32;
     gs->ZBuffering = GS_SETTING_OFF;
     gs->DoubleBuffering = GS_SETTING_OFF;
     gs->PrimAlphaEnable = GS_SETTING_OFF;
@@ -66,7 +66,7 @@ int psbridge_graphics_start(void)
     frame_texture.Width = PSP_BUFFER_WIDTH;
     frame_texture.Height = PSP_HEIGHT;
     frame_texture.PSM = GS_PSM_CT16;
-    frame_texture.Filter = GS_FILTER_NEAREST;
+    frame_texture.Filter = GS_FILTER_LINEAR;
     frame_texture.Mem = (u32 *)frame_pixels;
 
     texture_size = gsKit_texture_size(
@@ -88,7 +88,7 @@ int psbridge_graphics_start(void)
     frame_texture32.Width = PSP_BUFFER_WIDTH;
     frame_texture32.Height = PSP_HEIGHT;
     frame_texture32.PSM = GS_PSM_CT32;
-    frame_texture32.Filter = GS_FILTER_NEAREST;
+    frame_texture32.Filter = GS_FILTER_LINEAR;
     frame_texture32.Vram = gsKit_vram_alloc(
         gs,
         gsKit_texture_size(PSP_BUFFER_WIDTH, PSP_HEIGHT, GS_PSM_CT32),
