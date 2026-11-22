@@ -1,5 +1,9 @@
 # PSBridge
 
+<p align="center">
+  <img src="images/logofeiadadesgraça.png" alt="PSBridge logo" width="480">
+</p>
+
 psbridge is an experimental compatibility and recompilation project focused on bringing psp software to the playstation 2.
 
 instead of emulating the psp cpu instruction-by-instruction, psbridge aims to translate psp allegrex code into code that can run on the playstation 2's r5900 processor, while providing the compatibility needed for psp software to run on ps2 hardware.
@@ -39,13 +43,21 @@ some parts may still require runtime handling depending on how the original soft
 
 ## Project status
 
-psbridge is currently in an early experimental stage.
+psbridge is still experimental and roughly 40% of the way toward its initial goals.
 
-large parts of the project are still being designed, implemented, and tested.
+some psp games already boot through psbridge in pcsx2. mega man maverick hunter x reaches the title screen, and n.o.v.a. reaches the opening tutorial.
 
 compatibility, performance, and accuracy are not guaranteed.
 
-things will probably change a lot during development.
+### Screenshots
+
+**Mega Man Maverick Hunter x**
+
+![title screen of mega man maverick hunter x running in pcsx2](images/image.webp)
+
+**N.O.V.A.**
+
+![opening tutorial of n.o.v.a. running in pcsx2](images/nova.webp)
 
 ## Legal notice
 
