@@ -437,7 +437,7 @@ def emit(instruction, label, address, preserve_hi1=False):
             raise ValueError(f"jalr com registradores iguais em 0x{address:08x}")
         return resolve_jump(source) + [f"jalr {reg(link)}, {reg(source)}"]
 
-    if name in ("addu", "subu", "and", "or", "xor", "nor", "slt", "sltu", "movz", "movn"):
+    if name in ("addu", "sub", "subu", "and", "or", "xor", "nor", "slt", "sltu", "movz", "movn"):
         _, rd, rs, rt = instruction
         return [f"{name} {reg(rd)}, {reg(rs)}, {reg(rt)}"]
     if name in ("min", "max"):

@@ -88,9 +88,9 @@ def decode(address, word):
         if funct == 13:
             return "break", (word >> 6) & 0xfffff
 
-        if funct in (0x21, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2a, 0x2b, 0x2c, 0x2d):
+        if funct in (0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2a, 0x2b, 0x2c, 0x2d):
             name = {
-                0x21: "addu", 0x23: "subu", 0x24: "and", 0x25: "or",
+                0x21: "addu", 0x22: "sub", 0x23: "subu", 0x24: "and", 0x25: "or",
                 0x26: "xor", 0x27: "nor", 0x2a: "slt", 0x2b: "sltu",
                 0x2c: "max", 0x2d: "min",
             }[funct]
@@ -239,7 +239,7 @@ def format_instruction(instruction):
     if name == "jalr":
         return f"jalr {reg(instruction[1])}, {reg(instruction[2])}"
 
-    if name in ("addu", "subu", "and", "or", "xor", "nor", "slt", "sltu", "movz", "movn", "min", "max"):
+    if name in ("addu", "sub", "subu", "and", "or", "xor", "nor", "slt", "sltu", "movz", "movn", "min", "max"):
         _, rd, rs, rt = instruction
         return f"{name} {reg(rd)}, {reg(rs)}, {reg(rt)}"
 

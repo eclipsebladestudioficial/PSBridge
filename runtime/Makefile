@@ -1,5 +1,7 @@
 BUILD_DIR = ../build
 RUNTIME_BUILD = $(BUILD_DIR)/runtime
+GAME_ELF ?= $(or $(wildcard $(BUILD_DIR)/converted/jogo.elf),../jogo.elf)
+PYTHON ?= python3
 MAIN_OBJ = $(RUNTIME_BUILD)/main.o
 CORE_OBJS = $(addprefix $(RUNTIME_BUILD)/core/,imports.o guest.o vfpu_entry.o)
 API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o video.o io.o pgd.o memory.o module.o threadman.o lwmutex.o sync.o utility.o)
@@ -28,8 +30,8 @@ $(STRIPPED_BIN): $(EE_BIN)
 	cp $< $@
 	$(EE_STRIP) --strip-all $@
 
-$(BUILD_DIR)/game.s: ../jogo.elf $(wildcard ../tools/*.py)
-	cd .. && python3 tools/recompile.py jogo.elf build/game.s
+$(BUILD_DIR)/game.s: $(GAME_ELF) $(wildcard ../tools/*.py)
+	cd .. && "$(PYTHON)" tools/recompile.py "$(abspath $(GAME_ELF))" build/game.s
 
 $(BUILD_DIR)/game.o: $(BUILD_DIR)/game.s
 	cd .. && $(EE_AS) $(EE_ASFLAGS) -call_nonpic -msingle-float build/game.s -o build/game.o

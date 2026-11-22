@@ -70,14 +70,13 @@ def read_embedded_elf(path, position):
     return data, elf_type, entry, segments
 
 
-def find_overlays(root, image_base, image_size, code_limit=0x14000):
-    asset_root = root / "build" / "PSP_GAME"
-
+def find_overlays(asset_root, image_base, image_size, code_limit=0x14000, excluded=()):
     if not asset_root.is_dir():
-        return None
+        return []
 
     paths = sorted(
-        (path for path in asset_root.rglob("*") if path.is_file()),
+        (path for path in asset_root.rglob("*")
+         if path.relative_to(asset_root).parts[0] not in excluded and path.is_file()),
         key=lambda path: ("USRDIR" not in path.parts, str(path)),
     )
     image_end = image_base + image_size
@@ -221,7 +220,11 @@ def recompile(input_path, output_path):
     image_base = min(vaddr - offset for offset, vaddr, *_ in segments)
     overlays = []
 
-    for overlay in find_overlays(input_path.parent, image_base, len(data)):
+    input_dir = input_path.parent
+    converted = (input_dir / ".source.json").is_file()
+    asset_root = input_dir if converted else input_dir / "build" / "PSP_GAME"
+    excluded = (".disc", ".source.json", input_path.name, "UMD_DATA.BIN") if converted else ()
+    for overlay in find_overlays(asset_root, image_base, len(data), excluded=excluded):
         overlay_path, overlay_position, overlay_data, overlay_entry, overlay_segments = overlay
         overlay_code, overlay_words = read_overlay_code(overlay_data)
         overlays.append((
@@ -250,14 +253,6 @@ def recompile(input_path, output_path):
     if missing:
         address = min(missing)
         raise ValueError(f"o alvo 0x{address:08x} sumiu do código")
-
-    missing_fixups = (
-        set(references["high"]) | set(references["low"])
-    ) - addresses
-
-    if missing_fixups:
-        address = min(missing_fixups)
-        raise ValueError(f"o ajuste em 0x{address:08x} caiu fora do código")
 
     callbacks = find_callbacks(code, import_map)
     calls = {

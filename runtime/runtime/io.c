@@ -42,6 +42,7 @@ static UmdHandle umd_handles[UMD_HANDLES];
 static int umd_active = 1;
 static int umd_present = -1;
 static int umd_callback = -1;
+static const char *disc_prefix;
 
 #define PSP_DIR_LIMIT 12
 #define PSP_DIR_BASE 0x5000
@@ -86,6 +87,25 @@ typedef struct {
     u32 dummy;
 } PspDirent;
 
+static int host_file_exists(const char *path)
+{
+    int descriptor = open(path, O_RDONLY);
+
+    if (descriptor < 0)
+        return 0;
+
+    close(descriptor);
+    return 1;
+}
+
+static const char *host_disc_prefix(void)
+{
+    if (!disc_prefix)
+        disc_prefix = host_file_exists("host:converted/.source.json") ? "host:converted/.disc/" : "host:";
+
+    return disc_prefix;
+}
+
 static int host_path(const char *path, char *output)
 {
     const char *game_path = psbridge_game_pointer(path);
@@ -109,13 +129,13 @@ static int host_path(const char *path, char *output)
         return -1;
 
     if (!strncmp(game_path, "disc0:/", 7)) {
-        prefix = "host:";
+        prefix = host_disc_prefix();
         relative = game_path + 7;
     } else if (!strncmp(game_path, "ms0:/", 5)) {
         prefix = "host:ms0/";
         relative = game_path + 5;
     } else if (!strcmp(game_path, "disc0:")) {
-        prefix = "host:";
+        prefix = host_disc_prefix();
         relative = "";
     } else if (!strcmp(game_path, "ms0:")) {
         prefix = "host:ms0/";
@@ -148,27 +168,18 @@ static UmdHandle *umd_handle(int descriptor)
     return &umd_handles[index];
 }
 
-static int host_file_exists(const char *path)
-{
-    int descriptor = open(path, O_RDONLY);
-
-    if (descriptor < 0)
-        return 0;
-
-    close(descriptor);
-    return 1;
-}
-
 static UmdFile *get_umd_image(void)
 {
     off_t size;
     int descriptor;
     char signature[7];
+    char path[PATH_SIZE];
 
     if (umd_image_checked)
         return umd_image.used ? &umd_image : NULL;
 
-    descriptor = open("host:UMD.ISO", O_RDONLY);
+    snprintf(path, sizeof(path), "%sUMD.ISO", host_disc_prefix());
+    descriptor = open(path, O_RDONLY);
     if (descriptor >= 0) {
         size = lseek(descriptor, 0, SEEK_END);
         if (size >= 17 * 2048 && size % 2048 == 0 &&
@@ -368,8 +379,15 @@ static int new_umd_handle(void)
 int psbridge_umd_present(void)
 {
     if (umd_present < 0) {
-        umd_present = host_file_exists("host:UMD_DATA.BIN") &&
-            host_file_exists("host:PSP_GAME/PARAM.SFO");
+        char path[PATH_SIZE];
+        const char *prefix = host_disc_prefix();
+
+        snprintf(path, sizeof(path), "%sUMD_DATA.BIN", prefix);
+        umd_present = host_file_exists(path);
+        if (umd_present) {
+            snprintf(path, sizeof(path), "%sPSP_GAME/PARAM.SFO", prefix);
+            umd_present = host_file_exists(path);
+        }
     }
 
     return umd_present;
