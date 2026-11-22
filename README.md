@@ -10,6 +10,25 @@ instead of emulating the psp cpu instruction-by-instruction, psbridge aims to tr
 
 > this project is still experimental and is not intended to provide full psp compatibility yet.
 
+## How to use
+
+1. put your psp `.iso` in the `rom/` folder.
+2. run this from the project root.
+
+   ```sh
+   python3 tools/build.py
+   ```
+
+   if there's more than one iso in `rom/`, pass the filename in quotes.
+
+   ```sh
+   python3 tools/build.py "my game.iso"
+   ```
+
+3. open `build/PSBridge-debug.elf` in pcsx2 with host filesystem access enabled. keep `build/converted/` next to the elf so the game can load its files.
+
+the script extracts the iso to `build/converted/`, decrypts the game executable and writes `PSBridge-debug.elf` and `PSBridge-stripped.elf` to `build/`. the build uses python 3, make, `7z`, `pspdecrypt` and the ps2 toolchain with ps2sdk, gsKit and wolfSSL.
+
 ## How it works
 
 the general idea is:
@@ -47,7 +66,7 @@ psbridge is still experimental and roughly 40% of the way toward its initial goa
 
 some psp games already boot through psbridge in pcsx2. mega man maverick hunter x reaches the title screen, and n.o.v.a. reaches the opening tutorial.
 
-compatibility, performance, and accuracy are not guaranteed.
+compatibility, performance and accuracy vary by game. some games may fail to boot or stop before gameplay, even when the build succeeds.
 
 ### Screenshots
 
