@@ -45,6 +45,21 @@ def resolve_jump(source):
     return lines
 
 
+def resolve_indirect_jump(source):
+    return [
+        "sw $25, -4($sp)",
+        "sw $31, -8($sp)",
+        "mfhi1 $25" if source is None else f"or $25, {reg(source)}, $0",
+        "addiu $sp, $sp, -16",
+        "jal psbridge_resolve_guest",
+        "nop",
+        "lw $31, 8($sp)",
+        "addiu $sp, $sp, 16",
+        "jr $25",
+        "lw $25, -4($sp)",
+    ]
+
+
 def vfpu_memory_call(opcode):
     major = opcode >> 26
     if major not in (50, 54, 58, 62):
@@ -285,13 +300,52 @@ def emit_float_round(name, destination, source, address):
     return lines
 
 
-def emit(instruction, label, address):
+def emit_wsbw_preserving_hi1(destination, source, first, second):
+    temporary = next(index for index in (24, 23, 22, 21) if index not in (destination, source, first, second))
+    result = temporary if destination == 29 else destination
+    lines = [
+        "addiu $sp, $sp, -16",
+        f"sw {reg(first)}, 0($sp)",
+        f"sw {reg(second)}, 4($sp)",
+    ]
+
+    if source == 29 or destination == 29:
+        lines.append(f"sw {reg(temporary)}, 8($sp)")
+    if source == 29:
+        lines.append(f"addiu {reg(temporary)}, $sp, 16")
+        source = temporary
+
+    lines.extend([
+        f"sll {reg(first)}, {reg(source)}, 8",
+        f"lui {reg(second)}, 0xff00",
+        f"ori {reg(second)}, {reg(second)}, 0xff00",
+        f"and {reg(first)}, {reg(first)}, {reg(second)}",
+        f"srl {reg(result)}, {reg(source)}, 8",
+        f"nor {reg(second)}, {reg(second)}, $0",
+        f"and {reg(result)}, {reg(result)}, {reg(second)}",
+        f"or {reg(result)}, {reg(result)}, {reg(first)}",
+        f"sll {reg(first)}, {reg(result)}, 16",
+        f"srl {reg(result)}, {reg(result)}, 16",
+        f"or {reg(result)}, {reg(result)}, {reg(first)}",
+        f"lw {reg(first)}, 0($sp)",
+        f"lw {reg(second)}, 4($sp)",
+    ])
+    if destination == 29:
+        lines.extend([f"sw {reg(result)}, 12($sp)", f"lw {reg(temporary)}, 8($sp)", "lw $sp, 12($sp)"])
+    else:
+        if source == temporary:
+            lines.append(f"lw {reg(temporary)}, 8($sp)")
+        lines.append("addiu $sp, $sp, 16")
+    return lines
+
+
+def emit(instruction, label, address, preserve_hi1=False):
     name = instruction[0]
 
     if name == "vfpu_call":
         return emit_vfpu_dispatch(instruction[1], address)
 
-    if name == "nop":
+    if name in ("nop", "sync"):
         return [name]
 
     if name in ("sll", "srl", "sra"):
@@ -555,6 +609,9 @@ def emit(instruction, label, address):
 
         scratch = [item for item in (26, 27, 1, 25, 24, 23, 22, 21) if item not in (rd, rt)][:2]
         first, second = scratch
+        if preserve_hi1:
+            return emit_wsbw_preserving_hi1(rd, rt, first, second)
+
         return [
             f"mthi1 {reg(first)}",
             f"mtlo1 {reg(second)}",

@@ -18,7 +18,7 @@ static GSTEXTURE frame_texture;
 static GSTEXTURE frame_texture32;
 static int texture32_ready;
 static u16 frame_pixels[PSP_BUFFER_WIDTH * PSP_HEIGHT]
-    __attribute__((aligned(128)));
+    __attribute__((aligned(128), section(".runtime_scratch")));
 static int graphics_ready;
 static u32 frame_count;
 extern int psbridge_video_frame_modified(void);

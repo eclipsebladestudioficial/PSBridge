@@ -9,51 +9,11 @@ from pathlib import Path
 from allegrex import branch_names, vfpu_branches, decode, target_of
 from analyze import find_callbacks, find_jump_tables, output_register
 from elf_reader import read_code, read_header, read_segments, read_word
-from module_sexytion import add_image, add_info, add_map, add_overlay_map, write_map
+from module_sexytion import add_code_map, add_image, add_info, add_map, add_overlay_map, write_map
 from imports import find_module, read_imports, import_symbol, link_imports
-from r5900 import emit
-from relocate import PSP_USER_LOAD_ADDRESS, read_headers, read_relocations, patch_offset, relocate
+from r5900 import emit, resolve_indirect_jump
+from relocate import PSP_USER_LOAD_ADDRESS, relocate
 
-
-def find_image_pointers(elf, data, image_base, code_targets, section_base):
-    programs, sections = read_headers(elf)
-    image_start = min(program[2] for program in programs if program[0] == 1)
-    relocated_words = {
-        patch_offset(programs, entry, image_start)
-        for table in read_relocations(elf, sections)
-        for entry in table
-        if (entry[1] & 0xff) == 2
-    }
-    pointers = {}
-    functions = set()
-    image_end = image_base + len(data)
-
-    for section in sections:
-        _, kind, flags, address, _, size, _, _, _, _ = section
-
-        if kind == 8 or not flags & 2 or flags & 4:
-            continue
-
-        start = (address + section_base + 3) & ~3
-        end = address + section_base + size
-
-        for location in range(start, end - 3, 4):
-            offset = location - image_base
-
-            if offset not in relocated_words or offset < 0 or offset + 4 > len(data):
-                continue
-
-            value = struct.unpack_from("<I", data, offset)[0]
-
-            if value & 3 or value < image_base or value >= image_end:
-                continue
-
-            pointers[offset] = value
-
-            if value in code_targets:
-                functions.add(value)
-
-    return pointers, functions
 
 def read_game_code(elf, data, segments, absolute=False):
     base = 0 if absolute else min(vaddr - offset for offset, vaddr, *_ in segments)
@@ -181,42 +141,6 @@ def read_overlay_code(data):
     return code, words
 
 
-def emit_instruction(
-    address,
-    instruction,
-    label,
-    references,
-    lower_address=None,
-):
-    target = references["high"].get(address)
-
-    if target is not None:
-        if instruction[0] != "lui":
-            raise ValueError(f"o hi16 em 0x{address:08x} não é um lui")
-
-        return [f"lui ${instruction[1]}, %hi({label(target)})"]
-
-    target = references["low"].get(address)
-
-    if target is not None:
-        name, rt, rs = instruction[:3]
-
-        if name in ("addiu", "ori"):
-            return [f"{name} ${rt}, ${rs}, %lo({label(target)})"]
-
-        memory = (
-            "lb", "lbu", "lh", "lhu", "lwl", "lwr", "lw",
-            "sb", "sh", "swl", "swr", "sw",
-        )
-
-        if name in memory:
-            return [f"{name} ${rt}, %lo({label(target)})(${rs})"]
-
-        raise ValueError(f"o lo16 em 0x{address:08x} caiu num {name}")
-
-    return emit(instruction, label, address if instruction[0] == "vfpu_call" else (lower_address or address))
-
-
 def add_line(lines, line):
     lines.append(line if line.endswith(":") else f"    {line}")
 
@@ -246,44 +170,43 @@ def add_branch_with_long_delay(lines, address, instruction, delay, label, emit_a
 
 
 def add_jump_with_long_delay(lines, address, instruction, delay, label, emit_at):
+    delay = delay or ("nop",)
     name = instruction[0]
+    link = 31 if name == "jal" else instruction[1] if name == "jalr" else 0
+    source = instruction[-1] if name in ("jr", "jalr") else None
+    save_target = source and source in (link, output_register(delay))
 
-    if name in ("jal", "jalr"):
-        link = 31 if name == "jal" else instruction[1]
-        source = None if name == "jal" else instruction[2]
+    if save_target:
+        add_line(lines, f"mthi1 ${source}")
 
-        if source == link:
-            raise ValueError(f"o jalr em 0x{address:08x} escreveu em cima do próprio alvo")
-
+    if link:
         add_line(lines, f"lui ${link}, %hi({label(address + 8)})")
         add_line(lines, f"addiu ${link}, ${link}, %lo({label(address + 8)})")
-    else:
-        source = None if name == "j" else instruction[1]
 
-    if source is not None and output_register(delay) == source:
-        raise ValueError(f"o delay slot em 0x{address + 4:08x} apagou o alvo do salto")
-
-    if source is not None:
-        from r5900 import resolve_jump
-
-        for line in resolve_jump(source):
-            add_line(lines, line)
-
-    for line in emit_at(address + 4, delay, label, address + 0x100000000):
+    for line in emit_at(address + 4, delay, label, address + 0x100000000, preserve_hi1=bool(save_target)):
         add_line(lines, line)
 
-    if name in ("j", "jal"):
-        if instruction[1] == 0:
-            add_line(lines, ".word 0x08000000")
-        else:
-            add_line(lines, f"j {label(instruction[1])}")
-    else:
-        if source == 0:
-            add_line(lines, ".word 0x00000008")
-        else:
-            add_line(lines, f"jr ${source}")
+    if source and (name == "jalr" or source != 31 or save_target):
+        for line in resolve_indirect_jump(None if save_target else source):
+            add_line(lines, line)
+        return
 
+    if source is not None:
+        add_line(lines, ".word 0x00000008" if source == 0 else f"jr ${source}")
+    elif instruction[1] == 0:
+        add_line(lines, ".word 0x08000000")
+    else:
+        add_line(lines, f"j {label(instruction[1])}")
     add_line(lines, "nop")
+
+
+def needs_jump_lowering(instruction, delay_lines):
+    name = instruction[0]
+    if name == "jalr" and instruction[2] != 0:
+        return True
+    if name == "jr" and instruction[1] not in (0, 31):
+        return True
+    return name in ("j", "jal", "jr", "jalr") and len(delay_lines) > 1
 
 
 def recompile(input_path, output_path):
@@ -322,13 +245,6 @@ def recompile(input_path, output_path):
         code.pop(stub + 4, None)
 
     addresses = set(code)
-    image_pointers, pointer_functions = find_image_pointers(
-        elf,
-        data,
-        image_base,
-        addresses | set(import_map),
-        0 if absolute else image_base,
-    )
     missing = references["targets"] - addresses - set(import_map)
 
     if missing:
@@ -365,7 +281,7 @@ def recompile(input_path, output_path):
         callbacks |
         references["targets"] |
         direct_targets |
-        pointer_functions |
+        set(import_map) |
         return_followers
     )
 
@@ -386,17 +302,13 @@ def recompile(input_path, output_path):
     if not word_locations:
         print("sem relocations de jump tables")
 
-    def emit_at(address, instruction, current_label=label, lower_address=None):
-        return emit_instruction(
-            address,
-            instruction,
-            current_label,
-            references,
-            lower_address,
-        )
+    def emit_at(address, instruction, current_label=label, lower_address=None, preserve_hi1=False):
+        emission_address = address if instruction[0] == "vfpu_call" else (lower_address or address)
+        return emit(instruction, current_label, emission_address, preserve_hi1)
 
     lines = [".set noreorder", ".set noat", ".text", ".globl guest_entry"]
 
+    single_instruction = set()
     for address in sorted(code):
         instruction = code[address]
 
@@ -419,7 +331,7 @@ def recompile(input_path, output_path):
             )
             continue
 
-        if instruction[0] in ("j", "jal", "jr", "jalr") and len(delay_lines) > 1:
+        if needs_jump_lowering(instruction, delay_lines):
             add_jump_with_long_delay(
                 lines,
                 address,
@@ -430,7 +342,10 @@ def recompile(input_path, output_path):
             )
             continue
 
-        for line in emit_at(address, instruction):
+        native = emit_at(address, instruction)
+        if len(native) == 1:
+            single_instruction.add(address)
+        for line in native:
             add_line(lines, line)
 
     overlay_entries = []
@@ -452,21 +367,8 @@ def recompile(input_path, output_path):
         }
         overlay_external = overlay_direct_targets - overlay_addresses - addresses - set(import_map)
         unsupported_targets.update(overlay_external)
-        overlay_references = {
-            "high": {},
-            "low": {},
-            "targets": set(),
-            "words": set(),
-        }
-
-        def emit_overlay_at(address, instruction, current_label=overlay_label, lower_address=None):
-            return emit_instruction(
-                address,
-                instruction,
-                current_label,
-                overlay_references,
-                lower_address,
-            )
+        def emit_overlay_at(address, instruction, current_label=overlay_label, lower_address=None, preserve_hi1=False):
+            return emit_at(address, instruction, current_label, lower_address, preserve_hi1)
 
         for address in sorted(overlay_code):
             instruction = overlay_code[address]
@@ -485,7 +387,7 @@ def recompile(input_path, output_path):
                 )
                 continue
 
-            if instruction[0] in ("j", "jal", "jr", "jalr") and len(delay_lines) > 1:
+            if needs_jump_lowering(instruction, delay_lines):
                 add_jump_with_long_delay(
                     lines,
                     address,
@@ -535,26 +437,10 @@ def recompile(input_path, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     binary_path.write_bytes(data)
 
-    add_map(lines, map_addresses, label)
+    add_map(lines, map_addresses - addresses, label)
+    add_code_map(lines, addresses, image_base, label, single_instruction)
     add_overlay_map(lines, overlay_entries)
-    image_words = dict(references["words"])
-    image_words.update(image_pointers)
-
-    def image_label(target):
-        if target in addresses or target in import_map:
-            return label(target)
-
-        return f"guest_memory + 0x{target - image_base:x}"
-
-    file_size = add_image(
-        lines,
-        binary_path,
-        data,
-        segments,
-        image_words,
-        image_label,
-        image_base,
-    )
+    file_size = add_image(lines, binary_path, data, segments, image_base)
     add_info(lines, image_base, len(data), file_size, module["gp"])
 
     output_path.write_text("\n".join(lines) + "\n")
@@ -570,7 +456,6 @@ def recompile(input_path, output_path):
     print(f"tipos de instrução que fizeram o decoder gozar {len(names)}")
     print(f"relocações que pararam de apontar pra puta que pariu {relocations}")
     print(f"ponteiros de código que acharam o rumo {len(references['targets'])}")
-    print(f"ponteiros da imagem que acharam o rumo {len(image_pointers)}")
     print(f"tabelas de salto que pararam de se esconder {len(jump_tables)}")
     print(f"endereços que não vão mais se perder no mapa {len(map_addresses)}")
     print(f"entradas de overlay que acharam o rumo {len(overlay_entries)}")

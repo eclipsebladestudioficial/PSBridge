@@ -158,6 +158,9 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
         if (import->nid == 0x779103a0)
             return psbridge_file_rename((const char *)a0, (const char *)a1);
 
+        if (import->nid == 0xe95a012b)
+            return psbridge_file_ioctl_async((int)a0, a1, (void *)(uintptr_t)a2, a3,
+                (void *)(uintptr_t)a4, a5);
         if (import->nid == 0x63632449)
             return psbridge_file_ioctl(
                 (int)a0,
@@ -263,8 +266,11 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             return psbridge_delete_semaphore((int)a0);
         if (import->nid == 0x3f53e640)
             return psbridge_signal_semaphore((int)a0, (int)a1);
-        if (import->nid == 0x4e3a1105)
-            return psbridge_wait_semaphore((int)a0, (int)a1, (void *)(uintptr_t)a2);
+        if (import->nid == 0x4e3a1105 || import->nid == 0x6d212bac)
+            return psbridge_wait_semaphore((int)a0, (int)a1, (void *)(uintptr_t)a2,
+                import->nid == 0x6d212bac);
+        if (import->nid == 0xbc6febc5)
+            return psbridge_refer_semaphore((int)a0, (void *)(uintptr_t)a1);
         if (import->nid == 0x58b1f937)
             return psbridge_poll_semaphore((int)a0, (int)a1);
         if (import->nid == 0x9ace131e)

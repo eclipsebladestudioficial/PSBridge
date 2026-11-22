@@ -100,7 +100,8 @@ static void psbridge_memory_signal(void)
 }
 
 
-static HeapAllocation heap_allocations[HEAP_ALLOCATION_LIMIT];
+static HeapAllocation heap_allocations[HEAP_ALLOCATION_LIMIT]
+    __attribute__((section(".runtime_scratch")));
 static MemoryBlock blocks[BLOCK_LIMIT];
 static FixedPool pools[FPL_LIMIT];
 

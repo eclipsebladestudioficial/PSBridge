@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <timer.h>
 
+#include "pgd.h"
 #include "psbridge.h"
 #include "psbridge_log.h"
 
@@ -22,13 +23,13 @@
 typedef struct {
     int used;
     int raw;
-    int file_index;
+    struct UmdFile *file;
     s64 position;
     u64 start;
     u64 length;
 } UmdHandle;
 
-typedef struct {
+typedef struct UmdFile {
     int used;
     int descriptor;
     char path[PATH_SIZE];
@@ -55,6 +56,8 @@ static PspDirHandle directory_handles[PSP_DIR_LIMIT];
 static char current_psp_dir[PATH_SIZE] = "disc0:/";
 
 static UmdFile umd_files[UMD_FILES];
+static UmdFile umd_image;
+static int umd_image_checked;
 static u32 next_umd_sector;
 static int umd_file_lock = -1;
 typedef struct {
@@ -156,12 +159,44 @@ static int host_file_exists(const char *path)
     return 1;
 }
 
+static UmdFile *get_umd_image(void)
+{
+    off_t size;
+    int descriptor;
+    char signature[7];
+
+    if (umd_image_checked)
+        return umd_image.used ? &umd_image : NULL;
+
+    descriptor = open("host:UMD.ISO", O_RDONLY);
+    if (descriptor >= 0) {
+        size = lseek(descriptor, 0, SEEK_END);
+        if (size >= 17 * 2048 && size % 2048 == 0 &&
+            lseek(descriptor, 16 * 2048, SEEK_SET) >= 0 &&
+            read(descriptor, signature, sizeof(signature)) == sizeof(signature) &&
+            !memcmp(signature, "\x01" "CD001" "\x01", sizeof(signature))) {
+            umd_image.descriptor = descriptor;
+            umd_image.size = size;
+            umd_image.sector_count = size / 2048;
+            next_umd_sector = umd_image.sector_count;
+            umd_image.used = 1;
+        } else {
+            close(descriptor);
+        }
+    }
+
+    umd_image_checked = 1;
+    return umd_image.used ? &umd_image : NULL;
+}
+
 static UmdFile *register_umd_file(const char *path, u64 size)
 {
     u64 sectors;
     size_t path_length;
     int index;
     int descriptor;
+
+    get_umd_image();
 
     for (index = 0; index < UMD_FILES; index++) {
         if (umd_files[index].used && !strcmp(umd_files[index].path, path))
@@ -235,10 +270,14 @@ static int read_umd_file(UmdFile *file, u64 offset, void *buffer, u32 size)
 
 static UmdFile *find_umd_file(s64 sector)
 {
+    UmdFile *image = get_umd_image();
     int index;
 
     if (sector < 0)
         return NULL;
+
+    if (image && (u64)sector < image->sector_count)
+        return image;
 
     for (index = 0; index < UMD_FILES; index++) {
         UmdFile *file = &umd_files[index];
@@ -608,7 +647,7 @@ int psbridge_file_open(const char *path, int flags, int mode)
             return -1;
 
         handle = umd_handle(descriptor);
-        handle->file_index = file - umd_files;
+        handle->file = file;
         handle->start = offset;
         handle->length = size;
 
@@ -630,6 +669,43 @@ typedef struct {
 } PspAsyncHandle;
 
 static PspAsyncHandle async_handles[PSP_ASYNC_LIMIT];
+
+static struct {
+    int used;
+    int descriptor;
+    PspPgd pgd;
+} pgd_handles[PSP_ASYNC_LIMIT];
+
+static PspPgd *find_pgd(int descriptor, int create)
+{
+    int empty = -1;
+    int i;
+
+    for (i = 0; i < PSP_ASYNC_LIMIT; i++) {
+        if (pgd_handles[i].used && pgd_handles[i].descriptor == descriptor)
+            return &pgd_handles[i].pgd;
+        if (empty < 0 && !pgd_handles[i].used)
+            empty = i;
+    }
+
+    if (!create || empty < 0)
+        return NULL;
+
+    pgd_handles[empty].used = 1;
+    pgd_handles[empty].descriptor = descriptor;
+    return &pgd_handles[empty].pgd;
+}
+
+static void release_pgd(int descriptor)
+{
+    int i;
+    for (i = 0; i < PSP_ASYNC_LIMIT; i++) {
+        if (pgd_handles[i].used && pgd_handles[i].descriptor == descriptor) {
+            memset(&pgd_handles[i], 0, sizeof(pgd_handles[i]));
+            return;
+        }
+    }
+}
 
 static int register_async_result(int descriptor, s64 result)
 {
@@ -713,6 +789,7 @@ int psbridge_file_close(int descriptor)
         return 0;
     }
 
+    release_pgd(descriptor);
     return close(descriptor);
 }
 
@@ -726,7 +803,7 @@ int psbridge_file_read(int descriptor, void *buffer, u32 size)
 
     if (handle) {
         if (!handle->raw) {
-            UmdFile *file = &umd_files[handle->file_index];
+            UmdFile *file = handle->file;
             u64 remaining;
             int bytes_read;
 
@@ -781,6 +858,10 @@ int psbridge_file_read(int descriptor, void *buffer, u32 size)
         return size;
         
     }
+
+    PspPgd *pgd = find_pgd(descriptor, 0);
+    if (pgd && pgd->active)
+        return psbridge_pgd_read(pgd, descriptor, destination, size);
 
     return read(descriptor, destination, size);
 }
@@ -852,6 +933,10 @@ s64 psbridge_file_seek(int descriptor, u32 low, u32 high, int whence)
         handle->position = position;
         return position;
     }
+
+    PspPgd *pgd = find_pgd(descriptor, 0);
+    if (pgd && pgd->active)
+        return psbridge_pgd_seek(pgd, offset, whence);
 
     return lseek(descriptor, offset, whence);
 }
@@ -931,6 +1016,49 @@ int psbridge_file_rename(const char *old_path, const char *new_path)
     return rename(old_translated, new_translated);
 }
 
+static int pgd_ioctl(int descriptor, u32 command, u32 raw_input, const void *input, u32 input_size)
+{
+    PspPgd *pgd;
+
+    if (descriptor < 0)
+        return -1;
+
+    if (command == 0x04100010) {
+        off_t position, end;
+        pgd = find_pgd(descriptor, 0);
+        if (pgd && pgd->active)
+            return pgd->size;
+
+        position = lseek(descriptor, 0, SEEK_CUR);
+        if (position < 0)
+            return -1;
+        end = lseek(descriptor, 0, SEEK_END);
+        if (lseek(descriptor, position, SEEK_SET) < 0 || end < 0)
+            return -1;
+        return end;
+    }
+
+    pgd = find_pgd(descriptor, 1);
+    if (!pgd)
+        return -1;
+
+    if (command == 0x04100002) {
+        pgd->header_offset = raw_input;
+        if (input && input_size == sizeof(u32))
+            memcpy(&pgd->header_offset, input, sizeof(u32));
+        return 0;
+    }
+
+    return psbridge_pgd_open(pgd, descriptor, input_size == 16 ? input : NULL);
+}
+
+int psbridge_file_ioctl_async(int descriptor, u32 command, void *input, u32 input_size,
+    void *output, u32 output_size)
+{
+    return register_async_result(descriptor,
+        psbridge_file_ioctl(descriptor, command, input, input_size, output, output_size));
+}
+
 int psbridge_file_ioctl(
     int descriptor,
     u32 command,
@@ -949,10 +1077,13 @@ int psbridge_file_ioctl(
     u32 amount;
     s64 position;
 
-    if (!handle)
+    if (!handle) {
+        if (command == 0x04100001 || command == 0x04100002 || command == 0x04100010)
+            return pgd_ioctl(descriptor, command, (u32)(uintptr_t)input, input_data, input_size);
         return -1;
+    }
 
-    file = handle->raw ? NULL : &umd_files[handle->file_index];
+    file = handle->raw ? NULL : handle->file;
 
     if (command == 0x01020003) {
         if (!output_data || output_size < 4)

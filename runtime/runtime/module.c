@@ -35,6 +35,8 @@ static const char *const resident_modules[] = {
     "sceMpegbase_Driver",
     "sceMpeg_library",
     "scePsmf_library",
+    "scePsmfP_library",
+    "sceFont_Library",
 };
 
 static u32 read_le32(const u8 *data)

@@ -6,9 +6,8 @@ def quote_path(path):
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def add_image(lines, path, data, segments, pointers, label, image_base):
+def add_image(lines, path, data, segments, image_base):
     file_size = file_end(segments)
-    position = 0
 
     lines.extend([
         '.section .guest_image,"aw",@progbits',
@@ -20,20 +19,8 @@ def add_image(lines, path, data, segments, pointers, label, image_base):
         ".align 0",
     ])
 
-    for offset, target in sorted(pointers.items()):
-        if offset + 4 > file_size:
-            raise ValueError(f"o ponteiro em 0x{offset:08x} caiu fora dos dados")
-        if offset < position:
-            raise ValueError(f"o ponteiro em 0x{offset:08x} caiu em cima de outro")
-
-        if position < offset:
-            lines.append(f'.incbin "{quote_path(path)}", {position}, {offset - position}')
-
-        lines.append(f".word {label(target)}")
-        position = offset + 4
-
-    if position < file_size:
-        lines.append(f'.incbin "{quote_path(path)}", {position}, {file_size - position}')
+    if file_size:
+        lines.append(f'.incbin "{quote_path(path)}", 0, {file_size}')
 
     lines.extend([
         "guest_file_end:",
@@ -66,6 +53,45 @@ def add_map(lines, addresses, label):
         lines.append(f".word 0x{address:08x}, {label(address)}")
 
     lines.append("guest_map_end:")
+
+
+def add_code_map(lines, addresses, image_base, label, single_instruction):
+    blocks = {}
+    for address in sorted(addresses):
+        block, slot = divmod((address - image_base) // 4, 256)
+        blocks.setdefault(block, {})[slot] = address
+
+    lines.extend([
+        '.section .rodata.guest_code_map,"a",@progbits',
+        ".balign 4",
+        ".globl guest_code_map",
+        "guest_code_map:",
+    ])
+
+    for block in range(max(blocks, default=-1) + 1):
+        entries = blocks.get(block)
+        base = label(next(iter(entries.values()))) if entries else "0"
+        lines.append(f".word {base}, guest_code_block_{block}")
+    lines.extend([".globl guest_code_map_end", "guest_code_map_end:"])
+    lines.append(f".word 0, guest_code_block_{max(blocks, default=-1) + 1}")
+
+    for block in range(max(blocks, default=-1) + 1):
+        lines.append(f"guest_code_block_{block}:")
+        entries = blocks.get(block)
+        if not entries:
+            continue
+
+        base = label(next(iter(entries.values())))
+        previous = None
+        for slot in range(256):
+            address = entries.get(slot)
+            if address is None:
+                if previous is not None:
+                    lines.append(f".word 0x{slot:02x}ffffff")
+            elif previous is None or previous not in single_instruction:
+                lines.append(f".word (0x{slot:02x}000000 | ({label(address)} - {base}))")
+            previous = address
+    lines.append(f"guest_code_block_{max(blocks, default=-1) + 1}:")
 
 
 def add_overlay_map(lines, entries):

@@ -119,6 +119,53 @@ guest_resolve_virtual:
     nop
 
 guest_resolve_map:
+    lw $4, 4($5)
+    subu $2, $25, $4
+    andi $1, $2, 3
+    bnez $1, guest_resolve_sparse
+    nop
+
+    lui $3, %hi(guest_code_map)
+    addiu $3, $3, %lo(guest_code_map)
+    lui $4, %hi(guest_code_map_end)
+    addiu $4, $4, %lo(guest_code_map_end)
+    srl $6, $2, 10
+    sll $6, $6, 3
+    addu $6, $6, $3
+    sltu $1, $6, $4
+    beqz $1, guest_resolve_sparse
+    nop
+
+    lw $3, 0($6)
+    beqz $3, guest_resolve_sparse
+    andi $2, $2, 0x3fc
+
+    lw $4, 4($6)
+    lw $5, 12($6)
+
+guest_resolve_run:
+    beq $4, $5, guest_resolve_sparse
+    nop
+
+    lw $6, -4($5)
+    srl $7, $6, 24
+    sll $7, $7, 2
+    sltu $1, $2, $7
+    bnez $1, guest_resolve_run
+    addiu $5, $5, -4
+
+    sll $6, $6, 8
+    srl $6, $6, 8
+    lui $1, 0x00ff
+    ori $1, $1, 0xffff
+    beq $6, $1, guest_resolve_sparse
+    subu $2, $2, $7
+
+    addu $3, $3, $6
+    b guest_resolve_restore
+    addu $25, $3, $2
+
+guest_resolve_sparse:
     or $2, $0, $0
     lui $3, %hi(guest_map_count)
     lw $3, %lo(guest_map_count)($3)

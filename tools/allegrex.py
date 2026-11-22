@@ -46,6 +46,9 @@ def decode(address, word):
     if word == 0:
         return "nop",
 
+    if word == 0x0000000f:
+        return "sync",
+
     if op == 0:
         if funct == 0:
             return "sll", rd, rt, shift

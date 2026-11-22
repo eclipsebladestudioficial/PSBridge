@@ -65,6 +65,8 @@ SECTIONS {
 	_edata = .;
 	PROVIDE(edata = .);
 
+    __psbridge_before_image = .;
+
     .guest_image ALIGN(0x100000) : {
         *(.guest_image)
     }
@@ -88,12 +90,20 @@ SECTIONS {
 		*(.gnu.linkonce.b*)
 		*(COMMON)
 	}
-    .psbridge_heap (NOLOAD) : AT(ADDR(.psbridge_heap) - 0x80000000) {
+    __psbridge_after_bss = .;
+    __psbridge_scratch_start = ALIGN(__psbridge_before_image, 128);
+    .runtime_scratch (
+        __psbridge_scratch_start + SIZEOF(.runtime_scratch) <= ADDR(.guest_image)
+            ? __psbridge_scratch_start : ALIGN(__psbridge_after_bss, 128)
+    ) (NOLOAD) : AT(ADDR(.runtime_scratch) - 0x80000000) {
+        *(.runtime_scratch)
+    } :NONE
+    .psbridge_heap MAX(__psbridge_after_bss, ADDR(.runtime_scratch) + SIZEOF(.runtime_scratch)) (NOLOAD) : AT(ADDR(.psbridge_heap) - 0x80000000) {
         . = ALIGN(4096);
         __psbridge_heap_start = .;
         . += 4;
     } :text
-    .psbridge_heap_limit 0x81f00000 (NOLOAD) : AT(ADDR(.psbridge_heap_limit) - 0x80000000) {
+    .psbridge_heap_limit 0x81f80000 (NOLOAD) : AT(ADDR(.psbridge_heap_limit) - 0x80000000) {
         __psbridge_heap_end = .;
         . += 4;
         _end = . - 0x80000000;
