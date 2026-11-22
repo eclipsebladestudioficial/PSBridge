@@ -21,7 +21,11 @@ def library_id(name):
 
     return value
 
-def link_imports(lines, imports):
+def import_binding(library, nid):
+    return f"psp_binding_{library:08x}_{nid:08x}"
+
+
+def link_imports(lines, imports, exports=()):
     variables = [item for item in imports if item ["kind"] == "variable"]
 
     if variables:
@@ -52,11 +56,25 @@ def link_imports(lines, imports):
     for index, item in enumerate(functions):
         symbol = import_symbol(item)
         descriptor = f"psp_import_{index}"
+        key = (library_id(item["library"]), item["nid"])
 
         lines.extend([
             f".globl {symbol}",
             f".type {symbol}, @function",
             f"{symbol}:",
+        ])
+        if key in exports:
+            binding = import_binding(*key)
+            lines.extend([
+                f"    lui $25, %hi({binding})",
+                f"    lw $25, %lo({binding})($25)",
+                f"    beq $25, $0, {symbol}_hle",
+                "    nop",
+                "    jr $25",
+                "    nop",
+                f"{symbol}_hle:",
+            ])
+        lines.extend([
             f"    lui $25, %hi({descriptor})",
             "    j psbridge_import",
             f"    addiu $25, $25, %lo({descriptor})",
@@ -126,7 +144,7 @@ def valid_address(segments, address, size=0, file_only=False):
     return False
 
 
-def find_module(data, segments):
+def find_module(data, segments, allow_no_imports=False):
     found = []
 
     for segment_offset, _, file_size, _, _, _ in segments:
@@ -152,7 +170,7 @@ def find_module(data, segments):
                 continue
             if export_start > export_end or import_start > import_end:
                 continue
-            if import_end == import_start:
+            if import_end == import_start and (not allow_no_imports or export_end == export_start):
                 continue
 
             try:
@@ -179,6 +197,28 @@ def find_module(data, segments):
         raise ValueError("o módulo do psp foi pra puta que pariu")
 
     return max(found, key=lambda module: (module["import_count"], module["version"] == 0x0101))
+
+
+def read_library_exports(data, segments, module):
+    exports = {}
+    address = module["export_start"]
+
+    while address < module["export_end"]:
+        offset = file_offset(segments, address, 16)
+        name, _, _, length, variables, functions, table = struct.unpack_from("<IHHBBHI", data, offset)
+        if length != 4 or address + 16 > module["export_end"]:
+            raise ValueError("a tabela de exports veio toda torta")
+
+        if functions:
+            offset = file_offset(segments, table, (variables + functions) * 8)
+            library = library_id(read_string(data, segments, name)) if name else None
+            for index in range(functions):
+                nid = struct.unpack_from("<I", data, offset + index * 4)[0]
+                entry = struct.unpack_from("<I", data, offset + (variables + functions + index) * 4)[0]
+                exports[library, nid] = entry
+        address += 16
+
+    return exports
 
 
 def read_imports(data, segments, module):

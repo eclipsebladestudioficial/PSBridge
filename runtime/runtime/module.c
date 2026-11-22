@@ -21,9 +21,28 @@ enum ModuleState {
     MODULE_STOPPED,
 };
 
+typedef struct {
+    const void **binding;
+    const void *target;
+} ModuleExport;
+
+typedef struct {
+    u64 identity;
+    u32 file_size;
+    u32 address;
+    u32 image_size;
+    const void *image;
+    const ModuleExport *exports;
+    u32 export_count;
+} LibraryModule;
+
+extern const u32 psp_module_count;
+extern const LibraryModule psp_modules[];
+
 static struct {
     enum ModuleState state;
     int uid;
+    const LibraryModule *library;
 } modules[MODULE_COUNT];
 static int next_uid = MODULE_UID_BASE;
 
@@ -44,6 +63,111 @@ static u32 read_le32(const u8 *data)
     return data[0] | (u32)data[1] << 8 | (u32)data[2] << 16 | (u32)data[3] << 24;
 }
 
+static int register_module(const LibraryModule *library)
+{
+    unsigned int index, free_index = MODULE_COUNT;
+    int uid = NO_MEMORY;
+    int interrupts = DIntr();
+
+    for (index = 0; index < MODULE_COUNT; index++) {
+        if (modules[index].state == MODULE_UNUSED) {
+            if (free_index == MODULE_COUNT)
+                free_index = index;
+        } else if (library && modules[index].library == library) {
+            uid = UNKNOWN_MODULE;
+            break;
+        }
+    }
+    if (uid == NO_MEMORY && free_index != MODULE_COUNT) {
+        void *image = library ? psbridge_ram_pointer(library->address, library->image_size) : NULL;
+
+        if (!library || image) {
+            if (library) {
+                memcpy(image, library->image, library->image_size);
+                for (index = 0; index < library->export_count; index++)
+                    *library->exports[index].binding = library->exports[index].target;
+            }
+            uid = next_uid++;
+            modules[free_index].uid = uid;
+            modules[free_index].library = library;
+            modules[free_index].state = MODULE_LOADED;
+        }
+    }
+    if (interrupts)
+        EIntr();
+    return uid;
+}
+
+static int load_library_module(int descriptor, s64 start)
+{
+    u8 buffer[512];
+    u64 identity = 14695981039346656037ull;
+    s64 size;
+    u32 index;
+
+    if (!psp_module_count)
+        return UNSUPPORTED_PRX;
+
+    size = psbridge_file_seek(descriptor, 0, 0, SEEK_END);
+    if (size < start)
+        return FILE_ERROR;
+    size -= start;
+    for (index = 0; index < psp_module_count; index++) {
+        if (psp_modules[index].file_size == size)
+            break;
+    }
+    if (index == psp_module_count)
+        return UNSUPPORTED_PRX;
+    if (psbridge_file_seek(descriptor, (u32)start, (u64)start >> 32, SEEK_SET) != start)
+        return FILE_ERROR;
+
+    for (s64 remaining = size; remaining > 0;) {
+        unsigned int count = remaining < sizeof(buffer) ? (unsigned int)remaining : sizeof(buffer);
+
+        if (psbridge_file_read(descriptor, buffer, count) != (int)count)
+            return FILE_ERROR;
+        for (index = 0; index < count; index++)
+            identity = (identity ^ buffer[index]) * 1099511628211ull;
+        remaining -= count;
+    }
+
+    for (index = 0; index < psp_module_count; index++) {
+        if (psp_modules[index].file_size == size && psp_modules[index].identity == identity)
+            return register_module(&psp_modules[index]);
+    }
+    return UNSUPPORTED_PRX;
+}
+
+static void unbind_library_module(const LibraryModule *library)
+{
+    u32 index;
+
+    if (!library)
+        return;
+    for (index = 0; index < library->export_count; index++) {
+        const void **binding = library->exports[index].binding;
+        const void *target = NULL;
+        int uid = -1;
+        unsigned int slot;
+
+        for (slot = 0; slot < MODULE_COUNT; slot++) {
+            const LibraryModule *other = modules[slot].library;
+            u32 entry;
+
+            if (modules[slot].state == MODULE_UNUSED || !other || modules[slot].uid <= uid)
+                continue;
+            for (entry = 0; entry < other->export_count; entry++) {
+                if (other->exports[entry].binding == binding) {
+                    uid = modules[slot].uid;
+                    target = other->exports[entry].target;
+                    break;
+                }
+            }
+        }
+        *binding = target;
+    }
+}
+
 int psbridge_load_firmware_module(int descriptor)
 {
     u8 header[0x30];
@@ -51,11 +175,11 @@ int psbridge_load_firmware_module(int descriptor)
     s64 end;
     u32 size;
     unsigned int index;
-    int uid = NO_MEMORY;
-    int interrupts;
 
     if (start < 0 || psbridge_file_read(descriptor, header, sizeof(header)) != sizeof(header))
         return FILE_ERROR;
+    if (!memcmp(header, "\177ELF", 4))
+        return load_library_module(descriptor, start);
     if (!memcmp(header, "~SCE", 4)) {
         u32 offset = read_le32(header + 4);
 
@@ -81,18 +205,7 @@ int psbridge_load_firmware_module(int descriptor)
     if (index == sizeof(resident_modules) / sizeof(resident_modules[0]))
         return UNSUPPORTED_PRX;
 
-    interrupts = DIntr();
-    for (index = 0; index < MODULE_COUNT; index++) {
-        if (modules[index].state == MODULE_UNUSED) {
-            uid = next_uid++;
-            modules[index].uid = uid;
-            modules[index].state = MODULE_LOADED;
-            break;
-        }
-    }
-    if (interrupts)
-        EIntr();
-    return uid;
+    return register_module(NULL);
 }
 
 int psbridge_change_firmware_module(int uid, u32 operation, u32 status_address)
@@ -111,6 +224,8 @@ int psbridge_change_firmware_module(int uid, u32 operation, u32 status_address)
             result = NOT_STOPPED;
             if (state != MODULE_STARTED) {
                 modules[index].state = MODULE_UNUSED;
+                unbind_library_module(modules[index].library);
+                modules[index].library = NULL;
                 result = uid;
             }
             break;

@@ -10,8 +10,8 @@ from pathlib import Path
 from allegrex import branch_names, vfpu_branches, decode, target_of
 from analyze import find_callbacks, find_jump_tables, output_register
 from elf_reader import read_code, read_header, read_segments, read_word
-from module_sexytion import add_code_map, add_image, add_info, add_map, add_overlay_map, write_map
-from imports import find_module, read_imports, import_symbol, link_imports
+from module_sexytion import add_code_map, add_image, add_info, add_library_modules, add_map, add_overlay_map, write_map
+from imports import find_module, read_imports, read_library_exports, import_symbol, library_id, link_imports
 from r5900 import emit, resolve_indirect_jump
 from relocate import PSP_USER_LOAD_ADDRESS, relocate
 
@@ -214,6 +214,69 @@ def read_overlay_code(data):
     return code, words
 
 
+def read_library_modules(asset_root, first_address, excluded):
+    modules = []
+    address = (first_address + 255) & ~255
+    seen = set()
+
+    for path in sorted(asset_root.rglob("*")):
+        if path.relative_to(asset_root).parts[0] in excluded or path.suffix.lower() != ".prx" or not path.is_file():
+            continue
+
+        try:
+            elf = path.read_bytes()
+            elf_type, entry, ph_offset, ph_size, ph_count = read_header(elf)
+            if elf_type != 0xffa0 or entry != 0xffffffff:
+                continue
+
+            loads = read_segments(elf, ph_offset, ph_size, ph_count)
+            if not loads or any(file_size > memory_size for _, _, file_size, memory_size, *_ in loads):
+                continue
+            image_start = address + min(vaddr for _, vaddr, *_ in loads)
+            end = address + max(vaddr + memory_size for _, vaddr, _, memory_size, *_ in loads)
+            if image_start < PSP_USER_LOAD_ADDRESS or end > 0x0a000000:
+                continue
+
+            data, segments, _, _, references = relocate(elf, base=address)
+            module = find_module(data, segments, allow_no_imports=True)
+            exports = read_library_exports(data, segments, module)
+            imports = read_imports(data, segments, module)
+            if not exports or any(key[0] is None for key in exports) or any(item["kind"] != "function" for item in imports):
+                continue
+
+            code, _, _ = read_game_code(elf, data, segments)
+            code.update(read_relocated_code(data, segments, code, references))
+            if not all(target in code for target in exports.values()):
+                continue
+            targets = set(code) | {item["stub"] for item in imports}
+            if any(target not in targets and target != 0
+                   for instruction in code.values()
+                   if (target := target_of(instruction)) is not None):
+                continue
+        except (OSError, ValueError, UnicodeDecodeError, struct.error):
+            continue
+
+        identity = 14695981039346656037
+        for byte in elf:
+            identity = ((identity ^ byte) * 1099511628211) & 0xffffffffffffffff
+        if (len(elf), identity) in seen:
+            continue
+
+        seen.add((len(elf), identity))
+        modules.append({
+            "size": len(elf),
+            "identity": identity,
+            "address": image_start,
+            "data": data,
+            "code": code,
+            "imports": imports,
+            "exports": exports,
+        })
+        address = (end + 255) & ~255
+
+    return modules
+
+
 def add_line(lines, line):
     lines.append(line if line.endswith(":") else f"    {line}")
 
@@ -307,6 +370,13 @@ def recompile(input_path, output_path):
     converted = (input_dir / ".source.json").is_file()
     asset_root = input_dir if converted else input_dir / "build" / "PSP_GAME"
     excluded = (".disc", ".source.json", input_path.name, "UMD_DATA.BIN") if converted else ()
+    libraries = read_library_modules(asset_root, image_base + len(data), excluded)
+    memory_size = len(data)
+    for library in libraries:
+        code.update(library["code"])
+        imports.extend(library["imports"])
+        references["targets"].update(library["exports"].values())
+        memory_size = library["address"] + len(library["data"]) - image_base
     for overlay in find_overlays(asset_root, image_base, len(data), excluded=excluded):
         overlay_path, overlay_position, overlay_data, overlay_entry, overlay_segments = overlay
         overlay_code, overlay_words = read_overlay_code(overlay_data)
@@ -508,18 +578,24 @@ def recompile(input_path, output_path):
             "    jr $ra",
             "    nop",
         ])
-    linked_imports = link_imports(lines, imports)
+    import_keys = {(library_id(item["library"]), item["nid"]) for item in import_map.values()}
+    export_keys = {key for library in libraries for key in library["exports"] if key in import_keys}
+    linked_imports = link_imports(lines, imports, export_keys)
 
     binary_path = output_path.with_suffix(".bin")
     map_path = output_path.with_suffix(".map")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    binary_path.write_bytes(data)
+    with binary_path.open("wb") as binary:
+        binary.write(data)
+        for library in libraries:
+            binary.write(library["data"])
 
     add_map(lines, map_addresses - addresses, label)
     add_code_map(lines, addresses, image_base, label, single_instruction)
     add_overlay_map(lines, overlay_entries)
-    file_size = add_image(lines, binary_path, data, segments, image_base)
-    add_info(lines, image_base, len(data), file_size, module["gp"])
+    add_library_modules(lines, binary_path, len(data), libraries, export_keys, label)
+    file_size = add_image(lines, binary_path, memory_size, segments, image_base)
+    add_info(lines, image_base, memory_size, file_size, module["gp"])
 
     output_path.write_text("\n".join(lines) + "\n")
     write_map(map_path, map_addresses, label)

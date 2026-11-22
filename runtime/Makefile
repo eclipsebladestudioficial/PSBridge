@@ -30,7 +30,7 @@ $(STRIPPED_BIN): $(EE_BIN)
 	cp $< $@
 	$(EE_STRIP) --strip-all $@
 
-$(BUILD_DIR)/game.s: $(GAME_ELF) $(wildcard ../tools/*.py)
+$(BUILD_DIR)/game.s: $(GAME_ELF) $(wildcard $(dir $(GAME_ELF)).source.json) $(wildcard ../tools/*.py)
 	cd .. && "$(PYTHON)" tools/recompile.py "$(abspath $(GAME_ELF))" build/game.s
 
 $(BUILD_DIR)/game.o: $(BUILD_DIR)/game.s

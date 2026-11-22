@@ -1,3 +1,6 @@
+from imports import import_binding
+
+
 def file_end(segments):
     return max(offset + file_size for offset, _, file_size, _, _, _ in segments)
 
@@ -6,7 +9,7 @@ def quote_path(path):
     return str(path).replace("\\", "\\\\").replace('"', '\\"')
 
 
-def add_image(lines, path, data, segments, image_base):
+def add_image(lines, path, memory_size, segments, image_base):
     file_size = file_end(segments)
 
     lines.extend([
@@ -29,7 +32,7 @@ def add_image(lines, path, data, segments, image_base):
         ".globl guest_bss",
         ".globl guest_memory_end",
         "guest_bss:",
-        *([f".space {len(data) - file_size}"] if len(data) > file_size else []),
+        *([f".space {memory_size - file_size}"] if memory_size > file_size else []),
         "guest_memory_end:",
     ])
 
@@ -107,6 +110,44 @@ def add_overlay_map(lines, entries):
 
     for address, opcode, target in entries:
         lines.append(f".word 0x{address:08x}, 0x{opcode:08x}, {target}")
+
+
+def add_library_modules(lines, path, offset, modules, export_keys, label):
+    lines.extend(['.section .data.psp_modules,"aw",@progbits', ".balign 4"])
+    for key in sorted(export_keys):
+        lines.extend([f"{import_binding(*key)}:", ".word 0"])
+
+    lines.extend([
+        '.section .rodata.psp_modules,"a",@progbits',
+        ".balign 8",
+        ".globl psp_module_count, psp_modules",
+        "psp_module_count:",
+        f".word {len(modules)}",
+        ".balign 8",
+        "psp_modules:",
+    ])
+
+    for index, module in enumerate(modules):
+        identity = module["identity"]
+        exports = module["exports"].keys() & export_keys
+        lines.extend([
+            f".word 0x{identity & 0xffffffff:08x}, 0x{identity >> 32:08x}",
+            f".word {module['size']}, 0x{module['address']:08x}, {len(module['data'])}",
+            f".word psp_module_image_{index}, psp_module_exports_{index}, {len(exports)}",
+        ])
+
+    for index, module in enumerate(modules):
+        lines.append(f"psp_module_exports_{index}:")
+        for key in sorted(module["exports"].keys() & export_keys):
+            lines.append(f".word {import_binding(*key)}, {label(module['exports'][key])}")
+
+    for index, module in enumerate(modules):
+        size = len(module["data"])
+        lines.extend([
+            f"psp_module_image_{index}:",
+            f'.incbin "{quote_path(path)}", {offset}, {size}',
+        ])
+        offset += size
 
 
 def add_info(lines, base, data_size, file_size, gp):
