@@ -63,8 +63,8 @@ psbridge_import:
     nop
 
     dsrl32 $3, $2, 0
-    dsll32 $2, $2, 0
-    dsrl32 $2, $2, 0
+    sra $2, $2, 0
+    sra $3, $3, 0
 
     ld $gp, 32($sp)
     ld $27, 40($sp)

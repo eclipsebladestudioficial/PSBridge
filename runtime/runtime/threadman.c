@@ -1,6 +1,5 @@
 #include <delaythread.h>
 #include <kernel.h>
-#include <malloc.h>
 #include <stdint.h>
 #include <string.h>
 #include <timer.h>
@@ -9,7 +8,7 @@
 #include "psbridge_log.h"
 
 #define THREAD_ARG_SIZE 256
-#define THREAD_LIMIT 8
+#define THREAD_LIMIT 64
 #define THREAD_STACK_MIN 0x8000
 #define THREAD_STACK_MAX 0x100000
 #define KERNEL_STACK_SIZE 0x1000
@@ -159,7 +158,7 @@ static PspThread *find_thread(int uid)
     int index;
 
     for (index = 0; index < THREAD_LIMIT; index++) {
-        if (threads[index].used && threads[index].uid == uid)
+        if (threads[index].used > 0 && threads[index].uid == uid)
             return &threads[index];
     }
     return NULL;
@@ -211,79 +210,70 @@ static void run_thread(void *arg)
 
 int psbridge_create_thread(const char *name, void *entry, int priority, int stack_size, u32 attributes, void *options)
 {
+    int interrupt_state;
     int index;
+    u32 needed;
+    PspThread *thread;
+    ee_thread_t config;
+    int thread_id;
     (void)attributes;
     (void)options;
 
-    for (index = 0; index < THREAD_LIMIT; index++) {
-        ee_thread_t config;
-        int thread_id;
-        u32 needed;
-        void *stack;
+    if (stack_size > THREAD_STACK_MAX)
+        return -1;
+    needed = stack_size < THREAD_STACK_MIN ? THREAD_STACK_MIN : ((u32)stack_size + 15) & ~15u;
 
-        if (threads[index].used)
-            continue;
+    interrupt_state = DIntr();
+    for (index = 0; index < THREAD_LIMIT && threads[index].used; index++)
+        ;
+    thread = index < THREAD_LIMIT ? &threads[index] : NULL;
+    if (thread)
+        thread->used = -1;
+    if (interrupt_state)
+        EIntr();
+    if (!thread)
+        return -1;
 
-        if (stack_size <= 0)
-            stack_size = THREAD_STACK_MIN;
+    if (thread->stack_capacity < needed + KERNEL_STACK_SIZE) {
+        void *stack = psbridge_resize_thread_stack(thread->stack_buffer, needed + KERNEL_STACK_SIZE);
 
-        needed = ((u32)stack_size + 15) & ~15u;
-        if (needed < THREAD_STACK_MIN)
-            needed = THREAD_STACK_MIN;
-        if (needed > THREAD_STACK_MAX)
+        if (!stack) {
+            thread->used = 0;
             return -1;
-
-        if (threads[index].stack_capacity < needed + KERNEL_STACK_SIZE) {
-            stack = memalign(16, needed + KERNEL_STACK_SIZE);
-            if (!stack) {
-                PSB_LOG(THREAD, "pilha da thread peidou tamanho %u", needed);
-                return -1;
-            }
-            free(threads[index].stack_buffer);
-            threads[index].stack_buffer = stack;
-            threads[index].stack_capacity = needed + KERNEL_STACK_SIZE;
         }
-
-        if (priority < 2)
-            priority = 2;
-
-        if (priority > 126)
-            priority = 126;
-
-        memset(&config, 0, sizeof(config));
-
-        config.func = run_thread;
-        config.stack = threads[index].stack_buffer;
-        config.stack_size = needed;
-        config.gp_reg = &_gp;
-        config.initial_priority = priority;
-
-        thread_id = CreateThread(&config);
-
-        if (thread_id < 0)
-            return thread_id;
-
-        threads[index].used = 1;
-        threads[index].uid = next_thread_uid++;
-        threads[index].thread_id = thread_id;
-        threads[index].entry = entry;
-        threads[index].stack_size = needed;
-        threads[index].kernel_work =
-            (u8 *)threads[index].stack_buffer + needed;
-
-        PSB_LOG(
-            THREAD,
-            "thread %d nasceu na putaria entrada %08x pilha pedida %d pilha dada %d",
-            threads[index].uid,
-            (u32)(uintptr_t)entry,
-            stack_size,
-            needed
-        );
-
-        return threads[index].uid;
+        thread->stack_buffer = stack;
+        thread->stack_capacity = needed + KERNEL_STACK_SIZE;
     }
 
-    return -1;
+    if (priority < 2)
+        priority = 2;
+    if (priority > 126)
+        priority = 126;
+
+    memset(&config, 0, sizeof(config));
+    config.func = run_thread;
+    config.stack = thread->stack_buffer;
+    config.stack_size = needed;
+    config.gp_reg = &_gp;
+    config.initial_priority = priority;
+
+    thread_id = CreateThread(&config);
+    if (thread_id < 0) {
+        thread->used = 0;
+        return thread_id;
+    }
+
+    thread->thread_id = thread_id;
+    thread->entry = entry;
+    thread->stack_size = needed;
+    thread->kernel_work = (u8 *)thread->stack_buffer + needed;
+    interrupt_state = DIntr();
+    thread->uid = next_thread_uid++;
+    thread->used = 1;
+    if (interrupt_state)
+        EIntr();
+
+    return thread->uid;
 }
 
 int psbridge_start_thread(int uid, u32 arg_size, void *arg)
@@ -564,7 +554,7 @@ void *psbridge_thread_kernel_work(void)
     int index;
 
     for (index = 0; index < THREAD_LIMIT; index++) {
-        if (threads[index].used && threads[index].thread_id == current)
+        if (threads[index].used > 0 && threads[index].thread_id == current)
             return threads[index].kernel_work;
     }
 
@@ -577,7 +567,7 @@ int psbridge_psp_thread_uid(void)
     int index;
 
     for (index = 0; index < THREAD_LIMIT; index++) {
-        if (threads[index].used && threads[index].thread_id == current)
+        if (threads[index].used > 0 && threads[index].thread_id == current)
             return threads[index].uid;
     }
 
@@ -617,7 +607,7 @@ void psbridge_exit_guest_thread(int status)
     int caller = GetThreadId();
     (void)status;
     for (index = 0; index < THREAD_LIMIT; index++) {
-        if (threads[index].used && threads[index].thread_id == caller) {
+        if (threads[index].used > 0 && threads[index].thread_id == caller) {
             static unsigned logs;
             if (logs++ < 32)
                 PRINT_LOG("thread %d vazou da putaria resultado %d\n", threads[index].uid, status);
@@ -637,14 +627,31 @@ int psbridge_wakeup_guest_thread(int uid)
     return WakeupThread(thread->thread_id);
 }
 
-int psbridge_delete_guest_thread(int uid)
+int psbridge_delete_guest_thread(int uid, int terminate)
 {
     PspThread *thread = find_thread(uid);
     int result;
     if (!thread)
-        return -1;
+        return (int)0x80020198u;
+    if (thread->thread_id == GetThreadId())
+        return (int)0x80020197u;
+    if (terminate) {
+        ee_thread_status_t status;
+
+        result = ReferThreadStatus(thread->thread_id, &status);
+        if (result < 0)
+            return result;
+        if (status.status != THS_DORMANT) {
+            result = TerminateThread(thread->thread_id);
+            if (result < 0)
+                return result;
+        }
+    }
     result = DeleteThread(thread->thread_id);
-    if (result >= 0)
-        memset(thread, 0, sizeof(*thread));
-    return result;
+    if (result < 0)
+        return result;
+    if (terminate)
+        finish_guest_thread(uid, (int)0x800201acu);
+    thread->used = 0;
+    return 0;
 }

@@ -19,8 +19,6 @@ extern u32 vfpu_last_unsupported;
 extern u32 vfpu_last_unsupported_pc;
 extern u32 vfpu_last_invalid_address;
 
-extern u32 psbridge_mixer_sp;
-extern u32 psbridge_mixer_pointer;
 
 float vfpu_as_float(u32 bits);
 u32 vfpu_as_bits(float value);

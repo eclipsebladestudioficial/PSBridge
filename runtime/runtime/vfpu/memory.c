@@ -6,6 +6,8 @@
 void *vfpu_checked_pointer(u32 raw, u32 bytes)
 {
     u32 a = raw & 0x3fffffff;
+    void *ram;
+
     if ((a & 3) || a < 0x1000 || bytes > 0x10000)
         goto bad;
 
@@ -17,9 +19,9 @@ void *vfpu_checked_pointer(u32 raw, u32 bytes)
             return (void *)(uintptr_t)raw;
         goto bad;
     }
-    if (a >= guest_info.base && a - guest_info.base <= guest_info.memory_size &&
-        bytes <= guest_info.memory_size - (a - guest_info.base))
-        return psbridge_game_pointer((const void *)(uintptr_t)a);
+    ram = psbridge_ram_pointer(raw, bytes);
+    if (ram)
+        return ram;
     if (a >= 0x00100000 && a < 0x02000000 && bytes <= 0x02000000 - a)
         return (void *)(uintptr_t)(a | 0x80000000u);
 bad:

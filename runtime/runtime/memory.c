@@ -10,7 +10,20 @@ extern unsigned char __psbridge_heap_start[];
 extern unsigned char __psbridge_heap_end[];
 
 #define game_heap __psbridge_heap_start
-#define HEAP_SIZE ((u32)((uintptr_t)__psbridge_heap_end - (uintptr_t)__psbridge_heap_start))
+#define HEAP_SIZE ((u32)((uintptr_t)__psbridge_heap_end - (uintptr_t)game_heap))
+#define PSP_USER_RAM_START 0x08800000u
+#define PSP_USER_RAM_END   0x0a000000u
+#define PSP_UNCACHED       0x40000000u
+#define EE_RAM_MASK        0x1fffffffu
+#define TLB_PAGE_1M        0x100000u
+#define TLB_PAGE_4M        0x400000u
+#define TLB_PAGE_16M       0x1000000u
+#define TLB_FIRST_MIRROR   22
+#define TLB_SDK_MIRROR_END 39
+#define TLB_ENTRY_COUNT    48
+#define EE_UNCACHED_MIRROR       0x20000000u
+#define EE_ACCELERATED_MIRROR    0x30000000u
+#define EE_GUEST_UNCACHED_MIRROR 0x40000000u
 #define BLOCK_LIMIT 64
 #define FPL_LIMIT 16
 #define HEAP_ALLOCATION_LIMIT 24576
@@ -94,70 +107,183 @@ static FixedPool pools[FPL_LIMIT];
 static void * volatile_memory;
 static int volatile_locked;
 
-int psbridge_map_game_memory(void)
+static u32 psp_heap_base;
+static u32 psp_heap_physical;
+static u32 psp_heap_size;
+
+typedef struct {
+    u32 address;
+    u32 mask;
+    u32 even;
+    u32 odd;
+} RamTlbEntry;
+
+typedef struct {
+    int count;
+    RamTlbEntry entries[TLB_ENTRY_COUNT - TLB_FIRST_MIRROR];
+} RamTlb;
+
+static int add_ram_entry(RamTlb *tlb, u32 address, u32 mask, u32 even, u32 odd)
 {
-    const u32 page_size = 0x100000;
-    const u32 pair_size = page_size * 2;
-    const u32 page_mask = 0x001fe000;
-    const u32 flags = 0x1f;
-    u32 virtual_start;
-    u32 physical_start;
-    u32 mapped_size;
-    u32 offset;
+    int i;
 
-    virtual_start = guest_info.base & ~(pair_size - 1);
-    physical_start = (u32)(uintptr_t)guest_info.memory & 0x1fffffff;
-    physical_start -= guest_info.base - virtual_start;
+    for (i = 0; i < tlb->count; i++) {
+        RamTlbEntry *entry = &tlb->entries[i];
 
-    if ((physical_start & (page_size - 1)) != 0)
-        return -1;
-
-    mapped_size = guest_info.base - virtual_start + guest_info.memory_size;
-
-    for (offset = 0; offset < mapped_size; offset += pair_size) {
-        u32 physical = physical_start + offset;
-        int result = _SetTLBEntry(
-            31 + offset / pair_size,
-            page_mask,
-            virtual_start + offset,
-            (physical >> 6) | flags,
-            ((physical + page_size) >> 6) | flags
-        );
-
-        if (result < 0)
-            return result;
+        if (entry->address == address && entry->mask == mask) {
+            if ((entry->even != 1 && even != 1) ||
+                (entry->odd != 1 && odd != 1))
+                return -1;
+            entry->even |= even;
+            entry->odd |= odd;
+            return 0;
+        }
     }
 
-    for (offset = 0x00800000; offset < 0x02000000; offset += 0x00800000) {
-        int result = _SetTLBEntry(
-            39 + (offset - 0x00800000) / 0x00800000,
-            0x007fe000,
-            0x40000000 + offset,
-            (offset >> 6) | 0x17,
-            ((offset + 0x00400000) >> 6) | 0x17
-        );
+    if (tlb->count == TLB_ENTRY_COUNT - TLB_FIRST_MIRROR)
+        return -1;
+
+    tlb->entries[tlb->count++] = (RamTlbEntry){address, mask, even, odd};
+    return 0;
+}
+
+static int map_ram_range(RamTlb *tlb, u32 address, u32 physical, u32 size,
+                         u32 flags)
+{
+    while (size) {
+        u32 page = TLB_PAGE_1M;
+        u32 even, odd, bytes;
+        int result;
+
+        if (!((address | physical) & (TLB_PAGE_4M - 1)) &&
+            !(address & TLB_PAGE_4M) &&
+            (size == TLB_PAGE_4M || size >= 2 * TLB_PAGE_4M))
+            page = TLB_PAGE_4M;
+
+        if (address & page) {
+            even = 1;
+            odd = (physical >> 6) | flags;
+            bytes = page;
+        } else {
+            even = (physical >> 6) | flags;
+            odd = size >= 2 * page ? ((physical + page) >> 6) | flags : 1;
+            bytes = size >= 2 * page ? 2 * page : page;
+        }
+
+        result = add_ram_entry(tlb, address & ~(page * 2 - 1),
+                               (page - 0x1000) << 1, even, odd);
         if (result < 0)
             return result;
+
+        address += bytes;
+        physical += bytes;
+        size -= bytes;
     }
 
     return 0;
 }
 
-void *psbridge_game_pointer(const void *pointer) 
+static int map_psp_ram(RamTlb *tlb, u32 address, u32 physical, u32 size)
 {
-    u32 address = (u32) (uintptr_t)pointer;
+    int result = map_ram_range(tlb, address, physical, size, 0x1f);
 
-    if (!address)
-        return NULL;
+    if (result < 0)
+        return result;
 
-    if (
-        address < guest_info.base ||
-        address - guest_info.base >= guest_info.memory_size
-    )
-        return (void *) (uintptr_t) address;
+    return map_ram_range(tlb, address | PSP_UNCACHED, physical, size, 0x17);
+}
 
-    return (u8 *)guest_info.memory + address - guest_info.base;
-    
+static int map_ee_mirror(RamTlb *tlb, u32 address, u32 flags)
+{
+    return add_ram_entry(tlb, address, (TLB_PAGE_16M - 0x1000) << 1,
+                         flags, (TLB_PAGE_16M >> 6) | flags);
+}
+
+int psbridge_map_game_memory(void)
+{
+    const u32 page_mask = TLB_PAGE_1M - 1;
+    u32 image_start = guest_info.base & ~page_mask;
+    u32 image_end = (guest_info.base + guest_info.memory_size + page_mask) & ~page_mask;
+    u32 image_physical = ((u32)(uintptr_t)guest_info.memory & EE_RAM_MASK)
+        - (guest_info.base - image_start);
+    u32 heap_end = (u32)(uintptr_t)__psbridge_heap_end & EE_RAM_MASK & ~page_mask;
+    RamTlb tlb = {0};
+    int result, i;
+
+    if (image_physical & page_mask)
+        return -1;
+
+    result = map_ee_mirror(&tlb, EE_UNCACHED_MIRROR, 0x17);
+    if (result < 0)
+        return result;
+    result = map_ee_mirror(&tlb, EE_ACCELERATED_MIRROR, 0x3f);
+    if (result < 0)
+        return result;
+    result = map_ee_mirror(&tlb, EE_GUEST_UNCACHED_MIRROR, 0x17);
+    if (result < 0)
+        return result;
+
+    result = map_psp_ram(&tlb, image_start, image_physical, image_end - image_start);
+    if (result < 0)
+        return result;
+
+    psp_heap_base = PSP_USER_RAM_START;
+    if (image_start < PSP_USER_RAM_END && image_end > PSP_USER_RAM_START)
+        psp_heap_base = image_end;
+    psp_heap_physical = (((u32)(uintptr_t)game_heap & EE_RAM_MASK) + page_mask) & ~page_mask;
+    psp_heap_physical += (psp_heap_base - psp_heap_physical) & (TLB_PAGE_4M - 1);
+
+    if (psp_heap_base < PSP_USER_RAM_END && psp_heap_physical < heap_end) {
+        psp_heap_size = heap_end - psp_heap_physical;
+        if (psp_heap_size > PSP_USER_RAM_END - psp_heap_base)
+            psp_heap_size = PSP_USER_RAM_END - psp_heap_base;
+
+        result = map_psp_ram(&tlb, psp_heap_base, psp_heap_physical, psp_heap_size);
+        if (result < 0)
+            return result;
+    }
+
+    for (i = TLB_FIRST_MIRROR + tlb.count; i < TLB_SDK_MIRROR_END; i++) {
+        result = _SetTLBEntry(i, 0, 0xe0000000u + i * 0x2000u, 0, 0);
+        if (result < 0)
+            return result;
+    }
+    for (i = tlb.count - 1; i >= 0; i--) {
+        const RamTlbEntry *entry = &tlb.entries[i];
+
+        result = _SetTLBEntry(TLB_FIRST_MIRROR + i, entry->mask, entry->address,
+                              entry->even, entry->odd);
+        if (result < 0)
+            return result;
+    }
+    return 0;
+}
+
+void *psbridge_ram_pointer(u32 address, u32 size)
+{
+    u32 uncached = address & PSP_UNCACHED;
+    u32 canonical = address & ~PSP_UNCACHED;
+    u32 offset = canonical - guest_info.base;
+    u32 physical;
+
+    if (offset < guest_info.memory_size && size <= guest_info.memory_size - offset) {
+        physical = ((u32)(uintptr_t)guest_info.memory & EE_RAM_MASK) + offset;
+    } else {
+        offset = canonical - psp_heap_base;
+        if (offset >= psp_heap_size || size > psp_heap_size - offset)
+            return NULL;
+        physical = psp_heap_physical + offset;
+    }
+
+    return (void *)(uintptr_t)(physical | (uncached ? 0xa0000000 : 0x80000000));
+}
+
+void *psbridge_game_pointer(const void *pointer)
+{
+    u32 address = (u32)(uintptr_t)pointer;
+    void *ram = psbridge_ram_pointer(address, 1);
+
+    return ram ? ram : (void *)pointer;
 }
 
 static u32 heap_count;
@@ -242,7 +368,7 @@ static void *heap_alloc(u32 size, u32 alignment, int high)
 
 static void *heap_alloc_at(void *requested, u32 size)
 {
-    uintptr_t address = (uintptr_t)requested;
+    uintptr_t address = (uintptr_t)psbridge_game_pointer(requested);
     uintptr_t base = (uintptr_t)game_heap;
     u32 start;
     int low;
@@ -317,6 +443,20 @@ static int heap_free(void *pointer)
         return -1;
     heap_drop(index);
     return 0;
+}
+
+void *psbridge_resize_thread_stack(void *old_stack, u32 size)
+{
+    void *stack;
+
+    if (psbridge_memory_wait() < 0)
+        return NULL;
+
+    stack = heap_alloc(size, 64, 1);
+    if (stack && old_stack)
+        heap_free(old_stack);
+    psbridge_memory_signal();
+    return stack;
 }
 
 static int psbridge_volatile_lock_raw(void *address, void *size)

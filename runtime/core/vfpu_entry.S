@@ -99,7 +99,7 @@ psbridge_vfpu_entry:
     addiu $gp, $gp, %lo(_gp)
 
     jal psbridge_vfpu_dispatch
-    nop
+    sw $0, 64($sp)
 
     lw $8, 336($sp)
     ctc1 $8, $31
@@ -180,3 +180,94 @@ psbridge_vfpu_entry:
     nop
 
 .end psbridge_vfpu_entry
+
+.macro vfpu_memory_entry name, store, lanes, stride
+    .globl \name
+    .ent \name
+\name:
+    sw $9, 28($sp)
+    andi $24, $8, 3
+    bnez $24, .Lvfpu_memory_fallback
+    sll $9, $8, 2
+    srl $9, $9, 2
+    sltiu $24, $9, 0x1000
+    bnez $24, .Lvfpu_memory_fallback
+    srl $24, $8, 30
+    xori $24, $24, 2
+    beqz $24, .Lkernel_ram\@
+    nop
+
+    srl $24, $9, 21
+    xori $24, $24, 0x20
+    beqz $24, .Lvfpu_memory_fallback
+    or $8, $9, $0
+
+    lui $24, %hi(guest_info)
+    addiu $24, $24, %lo(guest_info)
+    lw $9, 4($24)
+    lw $24, 8($24)
+    subu $9, $8, $9
+    sltu $24, $9, $24
+    beqz $24, .Lphysical_ram\@
+    lui $24, %hi(guest_info)
+    addiu $24, $24, %lo(guest_info)
+    lw $24, 8($24)
+    subu $24, $24, $9
+    sltiu $24, $24, 4 * \lanes
+    bnez $24, .Lphysical_ram\@
+    lui $24, %hi(guest_info)
+    lw $24, %lo(guest_info)($24)
+    b .Lcopy_lanes\@
+    addu $8, $24, $9
+
+.Lphysical_ram\@:
+    lui $24, 0x0010
+    sltu $24, $8, $24
+    bnez $24, .Lvfpu_memory_fallback
+    or $9, $8, $0
+    lui $24, 0x8000
+    or $8, $8, $24
+.Lkernel_ram\@:
+    addiu $24, $9, (4 * \lanes - 1)
+    srl $24, $24, 25
+    bnez $24, .Lvfpu_memory_fallback
+    nop
+
+.Lcopy_lanes\@:
+    lui $24, %hi(vfpu_vr)
+    addiu $24, $24, %lo(vfpu_vr)
+    addu $25, $25, $24
+    .irp lane, 0, 1, 2, 3
+        .if \lane < \lanes
+            .if \store
+                lw $24, (\lane * \stride)($25)
+                sw $24, (\lane * 4)($8)
+            .else
+                lw $24, (\lane * 4)($8)
+                sw $24, (\lane * \stride)($25)
+            .endif
+        .endif
+    .endr
+
+    or $24, $31, $0
+    lw $31, 8($sp)
+    lw $8, 24($sp)
+    lw $9, 28($sp)
+    lw $25, 4($sp)
+    jr $24
+    lw $24, 0($sp)
+    .end \name
+.endm
+
+vfpu_memory_entry psbridge_vfpu_lv_s,     0, 1,   4
+vfpu_memory_entry psbridge_vfpu_sv_s,     1, 1,   4
+vfpu_memory_entry psbridge_vfpu_lv_q_row, 0, 4,   4
+vfpu_memory_entry psbridge_vfpu_sv_q_row, 1, 4,   4
+vfpu_memory_entry psbridge_vfpu_lv_q_col, 0, 4, 128
+vfpu_memory_entry psbridge_vfpu_sv_q_col, 1, 4, 128
+
+.Lvfpu_memory_fallback:
+    lw $9, 28($sp)
+    lw $27, 20($sp)
+    j psbridge_vfpu_entry
+    lw $8, 24($sp)

@@ -10,6 +10,7 @@
 #define EVENT_LIMIT 32
 #define CALLBACK_LIMIT 32
 #define WAIT_TIMEOUT ((int)0x800201a8u)
+#define WAIT_DELETE ((int)0x800201b5u)
 #define BAD_ID ((int)0x8002019au)
 
 typedef struct {
@@ -478,6 +479,10 @@ int psbridge_delay_thread(u32 delay, int use_callbacks)
 
 
 #define PSP_SEMA_LIMIT 32
+#define UNKNOWN_SEMID ((int)0x80020199u)
+#define SEMA_ZERO ((int)0x800201adu)
+#define SEMA_OVERFLOW ((int)0x800201aeu)
+#define ILLEGAL_COUNT ((int)0x800201bdu)
 
 typedef struct {
     int used;
@@ -521,7 +526,7 @@ int psbridge_create_semaphore(const char *name, u32 attributes, int initial, int
     if (idx == PSP_SEMA_LIMIT)
         return -1;
     memset(&cfg, 0, sizeof(cfg));
-    cfg.init_count = 0;
+    cfg.init_count = maximum == 1 ? initial : 0;
     cfg.max_count = 1;
     native = CreateSema(&cfg);
     if (native < 0)
@@ -559,8 +564,16 @@ int psbridge_signal_semaphore(int uid, int count)
     NativePspSema *sema = find_psp_sema(uid);
     int result;
 
-    if (!sema || count <= 0)
-        return -1;
+    if (!sema)
+        return UNKNOWN_SEMID;
+    if (count <= 0)
+        return ILLEGAL_COUNT;
+
+    if (sema->maximum == 1) {
+        if (count != 1 || SignalSema(sema->semaphore) < 0)
+            return SEMA_OVERFLOW;
+        return 0;
+    }
 
     result = WaitSema(sema->guard);
     if (result < 0)
@@ -568,12 +581,40 @@ int psbridge_signal_semaphore(int uid, int count)
 
     if (count > sema->maximum - sema->count) {
         SignalSema(sema->guard);
-        return -1;
+        return SEMA_OVERFLOW;
     }
 
     sema->count += count;
     SignalSema(sema->guard);
     return 0;
+}
+
+int psbridge_poll_semaphore(int uid, int count)
+{
+    NativePspSema *sema = find_psp_sema(uid);
+    int result;
+
+    if (!sema)
+        return UNKNOWN_SEMID;
+    if (count <= 0 || count > sema->maximum)
+        return ILLEGAL_COUNT;
+
+    if (sema->maximum == 1)
+        return PollSema(sema->semaphore) < 0 ? SEMA_ZERO : 0;
+
+    result = WaitSema(sema->guard);
+    if (result < 0)
+        return result;
+    if (!sema->used || sema->uid != uid) {
+        result = UNKNOWN_SEMID;
+    } else if (sema->count < count) {
+        result = SEMA_ZERO;
+    } else {
+        sema->count -= count;
+        result = 0;
+    }
+    SignalSema(sema->guard);
+    return result;
 }
 
 int psbridge_wait_semaphore(int uid, int count, void *timeout)
@@ -586,6 +627,9 @@ int psbridge_wait_semaphore(int uid, int count, void *timeout)
 
     if (!sema || count <= 0 || count > sema->maximum || (timeout && !remaining))
         return -1;
+
+    if (sema->maximum == 1 && !remaining)
+        return WaitSema(sema->semaphore) < 0 ? WAIT_DELETE : 0;
 
     for (;;) {
         u64 elapsed;
@@ -600,9 +644,13 @@ int psbridge_wait_semaphore(int uid, int count, void *timeout)
             SignalSema(sema->guard);
             return -1;
         }
-        available = sema->count >= count;
-        if (available)
-            sema->count -= count;
+        if (sema->maximum == 1) {
+            available = PollSema(sema->semaphore) >= 0;
+        } else {
+            available = sema->count >= count;
+            if (available)
+                sema->count -= count;
+        }
         SignalSema(sema->guard);
 
         elapsed = current_time() - started;

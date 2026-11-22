@@ -856,6 +856,15 @@ s64 psbridge_file_seek(int descriptor, u32 low, u32 high, int whence)
     return lseek(descriptor, offset, whence);
 }
 
+int psbridge_file_seek_async(int descriptor, u32 low, u32 high, int whence)
+{
+    s64 result = psbridge_file_seek(descriptor, low, high, whence);
+
+    if (result < 0)
+        return (int)result;
+    return register_async_result(descriptor, result);
+}
+
 int psbridge_file_stat(const char *path, void *output)
 {
     char translated[PATH_SIZE];

@@ -3,6 +3,9 @@ import sys
 from pathlib import Path
 
 
+PSP_USER_LOAD_ADDRESS = 0x08804000
+
+
 def signed(value):
     return value - 0x10000 if value & 0x8000 else value
 
@@ -210,7 +213,7 @@ def find_code_references(image, programs, sections, tables, base, image_start):
     }
 
 
-def relocate(data, base=0x00400000):
+def relocate(data, base=PSP_USER_LOAD_ADDRESS):
     programs, sections = read_headers(data)
     image, image_start = build_image(data, programs)
     tables = read_relocations(data, sections)

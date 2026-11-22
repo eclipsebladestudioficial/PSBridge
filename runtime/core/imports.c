@@ -43,12 +43,8 @@ static u64 system_time(void)
 #define LIB_STDIO 0x402828c6
 #define LIB_MPEG 0xe03657a3
 
-void psbridge_mixer_probe(u32 library, u32 nid, u32 callsite);
-
 u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 callsite)
 {
-    psbridge_mixer_probe(import->library, import->nid, callsite);
-
     if (import->library == LIB_SYSMEM) {
         if (import->nid == 0x13a5abef)
             return 0;
@@ -113,6 +109,15 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
 
         if (import->nid == 0x27eb27b8)
             return psbridge_file_seek((int)a0, a2, a3, (int)a4);
+
+        if (import->nid == 0x71b19e77)
+            return psbridge_file_seek_async((int)a0, a2, a3, (int)a4);
+
+        if (import->nid == 0x68963324)
+            return (s32)psbridge_file_seek((int)a0, a1, (s32)a1 >> 31, (int)a2);
+
+        if (import->nid == 0x1b385d8f)
+            return psbridge_file_seek_async((int)a0, a1, (s32)a1 >> 31, (int)a2);
 
         if (import->nid == 0xace946e8)
             return psbridge_file_stat((const char *)a0, (void *)a1);
@@ -260,12 +265,14 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             return psbridge_signal_semaphore((int)a0, (int)a1);
         if (import->nid == 0x4e3a1105)
             return psbridge_wait_semaphore((int)a0, (int)a1, (void *)(uintptr_t)a2);
+        if (import->nid == 0x58b1f937)
+            return psbridge_poll_semaphore((int)a0, (int)a1);
         if (import->nid == 0x9ace131e)
             return SleepThread();
         if (import->nid == 0xd59ead2f)
             return psbridge_wakeup_guest_thread((int)a0);
-        if (import->nid == 0x9fa03cd3)
-            return psbridge_delete_guest_thread((int)a0);
+        if (import->nid == 0x9fa03cd3 || import->nid == 0x383f7bcc)
+            return psbridge_delete_guest_thread((int)a0, import->nid == 0x383f7bcc);
         if (import->nid == 0x278c0df5 || import->nid == 0x840e8133)
             return psbridge_wait_guest_thread_end((int)a0,
                 (void *)(uintptr_t)a1, import->nid == 0x840e8133);
@@ -446,6 +453,24 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
         return 0;
 
     if (import->library == LIB_MODULEMGR) {
+        if (import->nid == 0xb7f46618)
+            return psbridge_load_firmware_module((int)a0);
+
+        if (import->nid == 0x977de386) {
+            int descriptor = psbridge_file_open((const char *)a0, 1, 0);
+            int module;
+
+            if (descriptor < 0)
+                return descriptor;
+            module = psbridge_load_firmware_module(descriptor);
+            psbridge_file_close(descriptor);
+            return module;
+        }
+
+        if (import->nid == 0x50f0c1ec || import->nid == 0xd1ff982a ||
+            import->nid == 0x2e0911aa)
+            return psbridge_change_firmware_module((int)a0, import->nid, a3);
+
         if (import->nid == 0xf0a26395)
             return 1;
 

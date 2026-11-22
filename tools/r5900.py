@@ -45,19 +45,51 @@ def resolve_jump(source):
     return lines
 
 
+def vfpu_memory_call(opcode):
+    major = opcode >> 26
+    if major not in (50, 54, 58, 62):
+        return [], "psbridge_vfpu_entry", "nop"
+
+    base = (opcode >> 21) & 31
+    offset = opcode & 0xfffc
+    if offset >= 0x8000:
+        offset -= 0x10000
+    if base == 29:
+        offset += 32
+    if offset > 0x7fff:
+        effective_address = ["addiu $8, $sp, 32", f"addiu $8, $8, {offset - 32}"]
+    else:
+        effective_address = [f"addiu $8, {reg(base)}, {offset}"]
+    effective_address.insert(0, "sw $8, 24($sp)")
+
+    lane = (opcode >> 16) & 31
+    direction = "lv" if major in (50, 54) else "sv"
+    if major in (50, 58):
+        lane |= (opcode & 3) << 5
+        layout = "s"
+    elif opcode & 1:
+        lane = (lane & 0x1c) + (lane & 3) * 32
+        layout = "q_row"
+    else:
+        layout = "q_col"
+    return effective_address, f"psbridge_vfpu_{direction}_{layout}", f"ori $25, $0, {lane * 4}"
+
+
 def emit_vfpu_dispatch(opcode, address):
+    effective_address, entry, delay = vfpu_memory_call(opcode)
     return [
         "addiu $sp, $sp, -32",
         "sw $24, 0($sp)",
         "sw $25, 4($sp)",
         "sw $31, 8($sp)",
         "sw $27, 20($sp)",
+        *effective_address,
         *load_value(24, opcode),
         "sw $24, 12($sp)",
         *load_value(25, address & 0xffffffff),
         "sw $25, 16($sp)",
-        "jal psbridge_vfpu_entry",
-        "nop",
+        f"jal {entry}",
+        delay,
         "lw $27, 20($sp)",
         "addiu $sp, $sp, 32"
     ]

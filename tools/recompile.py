@@ -12,7 +12,7 @@ from elf_reader import read_code, read_header, read_segments, read_word
 from module_sexytion import add_image, add_info, add_map, add_overlay_map, write_map
 from imports import find_module, read_imports, import_symbol, link_imports
 from r5900 import emit
-from relocate import read_headers, read_relocations, patch_offset, relocate
+from relocate import PSP_USER_LOAD_ADDRESS, read_headers, read_relocations, patch_offset, relocate
 
 
 def find_image_pointers(elf, data, image_base, code_targets, section_base):
@@ -186,15 +186,8 @@ def emit_instruction(
     instruction,
     label,
     references,
-    guest_base,
-    guest_size,
     lower_address=None,
 ):
-    if address == 0x0057d954:
-        if instruction != ("or", 4, 4, 2):
-            raise ValueError("instrução inesperada no fix de alias PSP 0x0057d954")
-        return ["or $4, $4, $0"]
-
     target = references["high"].get(address)
 
     if target is not None:
@@ -220,21 +213,6 @@ def emit_instruction(
             return [f"{name} ${rt}, %lo({label(target)})(${rs})"]
 
         raise ValueError(f"o lo16 em 0x{address:08x} caiu num {name}")
-
-    if instruction[0] == "lui":
-        register = instruction[1]
-        page = instruction[2] << 16
-
-        if page + 0x10000 > guest_base and page < guest_base + guest_size:
-            offset = page - guest_base
-            sign = "+" if offset >= 0 else "-"
-            amount = abs(offset)
-            image = f"guest_memory {sign} 0x{amount:x}"
-
-            return [
-                f"lui ${register}, %hi({image})",
-                f"addiu ${register}, ${register}, %lo({image})",
-            ]
 
     return emit(instruction, label, address if instruction[0] == "vfpu_call" else (lower_address or address))
 
@@ -313,7 +291,7 @@ def recompile(input_path, output_path):
 
     elf = input_path.read_bytes()
     absolute = struct.unpack_from("<H", elf, 16)[0] == 2
-    data, segments, entry, relocations, references = relocate(elf, base=0 if absolute else 0x00400000)
+    data, segments, entry, relocations, references = relocate(elf, base=0 if absolute else PSP_USER_LOAD_ADDRESS)
     module = find_module(data, segments)
     imports = read_imports(data, segments, module)
     code, names, base = read_game_code(elf, data, segments, absolute=absolute)
@@ -414,8 +392,6 @@ def recompile(input_path, output_path):
             instruction,
             current_label,
             references,
-            image_base,
-            len(data),
             lower_address,
         )
 
@@ -428,26 +404,6 @@ def recompile(input_path, output_path):
             lines.append("guest_entry:")
 
         lines.append(f"{label(address)}:")
-
-        if address == 0x006941a0:
-            lines.extend([
-                "    lui $1, 0x40",
-                "    sltu $1, $4, $1",
-                "    beq $1, $0, guest_strlen_pointer_valid",
-                "    nop",
-                "    jr $31",
-                "    addu $2, $0, $0",
-                "guest_strlen_pointer_valid:",
-            ])
-
-        if address == 0x0042b4cc:
-            lines.extend([
-                "    bne $4, $0, guest_text_object_valid",
-                "    nop",
-                "    jr $31",
-                "    addu $2, $0, $0",
-                "guest_text_object_valid:",
-            ])
 
         delay = code.get(address + 4)
         delay_lines = emit_at(address + 4, delay) if delay else []
@@ -509,8 +465,6 @@ def recompile(input_path, output_path):
                 instruction,
                 current_label,
                 overlay_references,
-                image_base,
-                len(data),
                 lower_address,
             )
 
