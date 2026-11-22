@@ -159,11 +159,14 @@ static int draw_solid_sprite(
     int format;
     int x;
     int y;
+    u32 clear = ge_state.command[GE_CLEARMODE];
+    int write_color = !(clear & 1) || (clear & 0x100);
+    int write_alpha = !(clear & 1) || (clear & 0x200);
 
-    if ((ge_state.command[GE_TEXTURE_ENABLE] & 1) && !(ge_state.command[GE_CLEARMODE] & 1))
+    if ((ge_state.command[GE_TEXTURE_ENABLE] & 1) && !(clear & 1))
         return 0;
 
-    if ((ge_state.command[GE_BLEND_ENABLE] & 1) && !(ge_state.command[GE_CLEARMODE] & 1))
+    if ((ge_state.command[GE_BLEND_ENABLE] & 1) && !(clear & 1))
         return 0;
 
     format = ge_state.command[GE_FRAMEBUF_FORMAT] & 3;
@@ -171,10 +174,13 @@ static int draw_solid_sprite(
     if (format != 1 && format != 3)
         return 0;
 
+    if (!write_color && !write_alpha)
+        return 1;
+
     if (!fast_sprite_target(&left, &top, &right, &bottom, &frame, &width))
         return 1;
 
-    if ((ge_state.command[GE_ALPHA_TEST_ENABLE] & 1) && !(ge_state.command[GE_CLEARMODE] & 1)) {
+    if ((ge_state.command[GE_ALPHA_TEST_ENABLE] & 1) && !(clear & 1)) {
         u32 alpha = ge_state.command[GE_ALPHATEST];
         u32 mask = (alpha >> 16) & 0xff;
 
@@ -188,12 +194,6 @@ static int draw_solid_sprite(
 
     if (format == 3) {
         u32 color = second.color;
-        u32 clear = ge_state.command[GE_CLEARMODE];
-        int write_color = !(clear & 1) || (clear & 0x100);
-        int write_alpha = !(clear & 1) || (clear & 0x200);
-
-        if (!write_color && !write_alpha)
-            return 1;
 
         for (y = top; y < bottom; y++) {
             u32 *row = (u32 *)frame + y * width + left;
@@ -220,12 +220,20 @@ static int draw_solid_sprite(
     {
         u16 color = pack_color(second.color, 1);
         u16 *pixels = frame;
+        u16 mask = (write_color ? 0x7fff : 0) | (write_alpha ? 0x8000 : 0);
 
         for (y = top; y < bottom; y++) {
             u16 *row = pixels + y * width + left;
 
-            for (x = left; x < right; x++)
-                *row++ = color;
+            if (write_color && write_alpha) {
+                for (x = left; x < right; x++)
+                    *row++ = color;
+            } else {
+                for (x = left; x < right; x++) {
+                    *row = (*row & ~mask) | (color & mask);
+                    row++;
+                }
+            }
         }
     }
 
@@ -312,16 +320,13 @@ static int draw_rgba5551_sprite(
 
     texture_width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     texture_height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+    buffer_width = texture_buffer_width(1);
     clamp_x = ge_state.command[GE_TEXWRAP] & 1;
     clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
     texture = ge_pointer(buffer_address(GE_TEXADDR0, GE_TEXBUFWIDTH0));
 
     if (!texture || !texture_width || !texture_height)
         return 0;
-
-    if (!buffer_width)
-        buffer_width = texture_width;
 
     if (!fast_sprite_target(
         &left,
@@ -451,7 +456,7 @@ static int draw_clut4_sprite(
 
     texture_width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     texture_height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+    buffer_width = texture_buffer_width(4);
     swizzled = ge_state.command[GE_TEXMODE] & 1;
     clamp_x = ge_state.command[GE_TEXWRAP] & 1;
     clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
@@ -459,9 +464,6 @@ static int draw_clut4_sprite(
 
     if (!texture || !texture_width || !texture_height)
         return 0;
-
-    if (!buffer_width)
-        buffer_width = texture_width;
 
     if (!fast_sprite_target(
         &left,
@@ -606,7 +608,7 @@ static int draw_rgba8888_sprite(
 
     texture_width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     texture_height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+    buffer_width = texture_buffer_width(3);
     swizzled = ge_state.command[GE_TEXMODE] & 1;
     clamp_x = ge_state.command[GE_TEXWRAP] & 1;
     clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
@@ -614,9 +616,6 @@ static int draw_rgba8888_sprite(
 
     if (!texture || !texture_width || !texture_height)
         return 0;
-
-    if (!buffer_width)
-        buffer_width = texture_width;
 
     if (!fast_sprite_target(
         &left,
@@ -923,15 +922,13 @@ static inline __attribute__((always_inline)) u32 blend_dxt_packed(
 
 static int triangle_rgba_texture_setup(TriangleRgbaTexture *texture)
 {
-    int buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+    int buffer_width = texture_buffer_width(3);
 
     if ((ge_state.command[GE_TEXFORMAT] & 0xf) != 3)
         return 0;
 
     texture->width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     texture->height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    if (!buffer_width)
-        buffer_width = texture->width;
     texture->row_bytes = buffer_width * 4;
     texture->clamp_x = ge_state.command[GE_TEXWRAP] & 1;
     texture->clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
@@ -1025,9 +1022,7 @@ static int triangle_indexed_texture_setup(TrianglePalette *texture)
 
     texture->texture_width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     texture->texture_height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
-    if (!buffer_width)
-        buffer_width = texture->texture_width;
+    buffer_width = texture_buffer_width(texture->format);
 
     texture->texture = ge_pointer(buffer_address(GE_TEXADDR0, GE_TEXBUFWIDTH0));
     if (!texture->texture)
@@ -1939,6 +1934,7 @@ void draw_primitive(u32 argument)
     u32 type = ge_state.command[GE_VERTEXTYPE];
     int primitive = argument >> 16;
     int count = argument & 0xffff;
+    int index_type = (type >> 11) & 3;
     VertexLayout layout;
     int index;
 
@@ -1952,10 +1948,7 @@ void draw_primitive(u32 argument)
                 read_vertex(index, type, layout),
                 read_vertex(index + 1, type, layout)
             );
-        return;
-    }
-
-    if (primitive == 3) {
+    } else if (primitive == 3) {
         for (index = 0; index + 2 < count; index += 3)
             draw_clipped_triangle(
                 read_vertex(index, type, layout),
@@ -1963,10 +1956,7 @@ void draw_primitive(u32 argument)
                 read_vertex(index + 2, type, layout),
                 type, 0
             );
-        return;
-    }
-
-    if (primitive == 4) {
+    } else if (primitive == 4) {
         for (index = 0; index + 2 < count; index++)
             draw_clipped_triangle(
                 read_vertex(index, type, layout),
@@ -1974,10 +1964,7 @@ void draw_primitive(u32 argument)
                 read_vertex(index + 2, type, layout),
                 type, index & 1
             );
-        return;
-    }
-
-    if (primitive == 5) {
+    } else if (primitive == 5) {
         GeVertex first = read_vertex(0, type, layout);
 
         for (index = 1; index + 1 < count; index++)
@@ -1988,4 +1975,9 @@ void draw_primitive(u32 argument)
                 type, 0
             );
     }
+
+    if (index_type)
+        ge_state.index_address += (u32)count << (index_type - 1);
+    else
+        ge_state.vertex_address += (u32)count * layout.stride;
 }

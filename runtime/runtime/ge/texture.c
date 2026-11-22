@@ -242,9 +242,7 @@ int ge_dxt_setup(GeDxtSampler *sampler)
         return 0;
     sampler->width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     sampler->height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
-    if (!buffer_width)
-        buffer_width = sampler->width;
+    buffer_width = texture_buffer_width(sampler->format);
     sampler->blocks_w = (buffer_width + 3) >> 2;
     sampler->bytes = sampler->format == 8 ? 8 : 16;
     sampler->clamp_x = ge_state.command[GE_TEXWRAP] & 1;
@@ -410,7 +408,7 @@ u32 texture_pixel(int x, int y)
     int format = ge_state.command[GE_TEXFORMAT] & 0xf;
     int width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     int height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    int buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+    int buffer_width = texture_buffer_width(format);
     int swizzled = ge_state.command[GE_TEXMODE] & 1;
     int clamp_x = ge_state.command[GE_TEXWRAP] & 1;
     int clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
@@ -443,9 +441,6 @@ u32 texture_pixel(int x, int y)
         if (y < 0)
             y += height;
     }
-
-    if (!buffer_width)
-        buffer_width = width;
 
     if (format <= 2) {
         offset = pixel_offset(x, y, buffer_width * 2, 2, swizzled);
@@ -609,10 +604,7 @@ int prepare_triangle_palette(TrianglePalette *fast)
 
     fast->texture_width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     fast->texture_height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
-    buffer_width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
-
-    if (!buffer_width)
-        buffer_width = fast->texture_width;
+    buffer_width = texture_buffer_width(fast->format);
 
     fast->texture = ge_pointer(buffer_address(GE_TEXADDR0, GE_TEXBUFWIDTH0));
     fast->frame = ge_pointer(buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH));

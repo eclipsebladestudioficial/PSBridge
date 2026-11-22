@@ -300,6 +300,20 @@ u32 texture_pixel(int x, int y);
 u32 shade_pixel(u32 texture, u32 vertex);
 int prepare_triangle_palette(TrianglePalette *fast);
 
+static inline int texture_buffer_width(int format)
+{
+    static const u8 alignment[8] = {8, 8, 8, 4, 32, 16, 8, 4};
+    int width = ge_state.command[GE_TEXBUFWIDTH0] & 0x7ff;
+
+    if (format < 8) {
+        int step = alignment[format];
+        width &= -step;
+        return width ? width : step;
+    }
+
+    return width ? width : 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
+}
+
 static inline int pixel_offset(int x, int y, int row_bytes, int bytes, int swizzled)
 {
     int byte_x = x * bytes;
