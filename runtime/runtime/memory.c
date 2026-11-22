@@ -8,11 +8,15 @@
 
 extern unsigned char __psbridge_heap_start[];
 extern unsigned char __psbridge_heap_end[];
+extern unsigned char __psbridge_stack_start[];
+extern unsigned char __psbridge_stack_end[];
 
 #define game_heap __psbridge_heap_start
 #define HEAP_SIZE ((u32)((uintptr_t)__psbridge_heap_end - (uintptr_t)game_heap))
 #define PSP_USER_RAM_START 0x08800000u
 #define PSP_USER_RAM_END   0x0a000000u
+#define PSP_SCRATCH_START  0x00010000u
+#define PSP_SCRATCH_SIZE   0x4000u
 #define PSP_UNCACHED       0x40000000u
 #define EE_RAM_MASK        0x1fffffffu
 #define TLB_PAGE_1M        0x100000u
@@ -28,6 +32,7 @@ extern unsigned char __psbridge_heap_end[];
 #define FPL_LIMIT 16
 #define HEAP_ALLOCATION_LIMIT 24576
 #define VPL_LIMIT 16
+#define STACK_PAGE_SIZE 4096u
 
 static int memory_guard = -1;
 
@@ -104,6 +109,7 @@ static HeapAllocation heap_allocations[HEAP_ALLOCATION_LIMIT]
     __attribute__((section(".runtime_scratch")));
 static MemoryBlock blocks[BLOCK_LIMIT];
 static FixedPool pools[FPL_LIMIT];
+static u16 stack_pages[TLB_PAGE_1M / STACK_PAGE_SIZE];
 
 static void * volatile_memory;
 static int volatile_locked;
@@ -111,6 +117,8 @@ static int volatile_locked;
 static u32 psp_heap_base;
 static u32 psp_heap_physical;
 static u32 psp_heap_size;
+static u8 psp_scratchpad[PSP_SCRATCH_SIZE]
+    __attribute__((aligned(PSP_SCRATCH_SIZE)));
 
 typedef struct {
     u32 address;
@@ -224,6 +232,11 @@ int psbridge_map_game_memory(void)
     if (result < 0)
         return result;
 
+    result = add_ram_entry(&tlb, PSP_SCRATCH_START, (PSP_SCRATCH_SIZE - 0x1000) << 1,
+                           (((u32)(uintptr_t)psp_scratchpad & EE_RAM_MASK) >> 6) | 0x1f, 1);
+    if (result < 0)
+        return result;
+
     result = map_psp_ram(&tlb, image_start, image_physical, image_end - image_start);
     if (result < 0)
         return result;
@@ -266,6 +279,10 @@ void *psbridge_ram_pointer(u32 address, u32 size)
     u32 canonical = address & ~PSP_UNCACHED;
     u32 offset = canonical - guest_info.base;
     u32 physical;
+
+    if (address - PSP_SCRATCH_START < PSP_SCRATCH_SIZE &&
+        size <= PSP_SCRATCH_SIZE - (address - PSP_SCRATCH_START))
+        return psp_scratchpad + (address - PSP_SCRATCH_START);
 
     if (offset < guest_info.memory_size && size <= guest_info.memory_size - offset) {
         physical = ((u32)(uintptr_t)guest_info.memory & EE_RAM_MASK) + offset;
@@ -448,14 +465,36 @@ static int heap_free(void *pointer)
 
 void *psbridge_resize_thread_stack(void *old_stack, u32 size)
 {
-    void *stack;
+    uintptr_t start = (uintptr_t)__psbridge_stack_start;
+    uintptr_t end = (uintptr_t)__psbridge_stack_end;
+    uintptr_t old = (uintptr_t)old_stack;
+    u32 pages = (size + STACK_PAGE_SIZE - 1) / STACK_PAGE_SIZE;
+    u32 capacity = (end - start) / STACK_PAGE_SIZE;
+    u32 first = 0;
+    void *stack = NULL;
 
     if (psbridge_memory_wait() < 0)
         return NULL;
 
-    stack = heap_alloc(size, 64, 1);
-    if (stack && old_stack)
-        heap_free(old_stack);
+    for (u32 page = 0; page < capacity && pages <= capacity; page++) {
+        if (stack_pages[page]) {
+            page += stack_pages[page] - 1;
+            first = page + 1;
+        } else if (page - first + 1 == pages) {
+            stack_pages[first] = pages;
+            stack = (void *)(start + first * STACK_PAGE_SIZE);
+            break;
+        }
+    }
+
+    if (!stack)
+        stack = heap_alloc(size, 64, 1);
+    if (stack && old_stack) {
+        if (old >= start && old < end)
+            stack_pages[(old - start) / STACK_PAGE_SIZE] = 0;
+        else
+            heap_free(old_stack);
+    }
     psbridge_memory_signal();
     return stack;
 }

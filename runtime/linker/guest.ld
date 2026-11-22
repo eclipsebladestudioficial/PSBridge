@@ -98,6 +98,11 @@ SECTIONS {
     ) (NOLOAD) : AT(ADDR(.runtime_scratch) - 0x80000000) {
         *(.runtime_scratch)
     } :NONE
+    __psbridge_stack_start = ALIGN(
+        ADDR(.runtime_scratch) < ADDR(.guest_image)
+            ? ADDR(.runtime_scratch) + SIZEOF(.runtime_scratch)
+            : __psbridge_before_image, 0x1000);
+    __psbridge_stack_end = ADDR(.guest_image);
     .psbridge_heap MAX(__psbridge_after_bss, ADDR(.runtime_scratch) + SIZEOF(.runtime_scratch)) (NOLOAD) : AT(ADDR(.psbridge_heap) - 0x80000000) {
         . = ALIGN(4096);
         __psbridge_heap_start = .;

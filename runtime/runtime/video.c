@@ -36,6 +36,18 @@ extern u32 psbridge_ge_ready_buffer(void);
 extern u32 psbridge_ge_ready_sequence(void);
 
 #define VBLANK_DURATION_US 16683u
+#define DISPLAY_LINES_PER_FRAME 286u
+#define VBLANK_INTERRUPT 30u
+#define VBLANK_USER_SLOTS 16u
+
+typedef struct {
+    u32 entry;
+    u32 argument;
+} VblankHandler;
+
+static VblankHandler vblank_handlers[VBLANK_USER_SLOTS];
+static u32 vblank_enabled;
+static u32 vblank_next;
 
 static u64 current_time(void)
 {
@@ -46,16 +58,84 @@ static u64 current_time(void)
     return (u64)seconds * 1000000 + microseconds;
 }
 
-static u32 current_vcount(void)
+static u64 display_elapsed(u64 now)
 {
-    u64 now = current_time();
-
     if (!vblank_ready) {
         vblank_epoch = now;
         vblank_ready = 1;
     }
 
-    return (u32)((now - vblank_epoch) / VBLANK_DURATION_US);
+    return now - vblank_epoch;
+}
+
+static u32 current_vcount(void)
+{
+    return (u32)(display_elapsed(current_time()) / VBLANK_DURATION_US);
+}
+
+void psbridge_vblank_interrupts(void)
+{
+    if (!vblank_enabled || (s32)(current_vcount() - vblank_next) < 0 ||
+        !psbridge_try_enter_intr())
+        return;
+
+    u32 count = current_vcount();
+    if ((s32)(count - vblank_next) >= 0) {
+        vblank_next = count + 1;
+        for (u32 slot = 0; slot < VBLANK_USER_SLOTS; slot++) {
+            VblankHandler handler = vblank_handlers[slot];
+            if ((vblank_enabled & (1u << slot)) && handler.entry)
+                psbridge_call_callback((void *)(uintptr_t)handler.entry, slot, handler.argument, 0);
+        }
+    }
+
+    psbridge_resume_intr(1);
+}
+
+u32 psbridge_subinterrupt(u32 nid, u32 interrupt, u32 slot, u32 entry, u32 argument)
+{
+    if (interrupt != VBLANK_INTERRUPT)
+        return 0x80020068u;
+    if (slot >= VBLANK_USER_SLOTS)
+        return 0x80020065u;
+
+    u32 flags = psbridge_suspend_intr();
+    u32 bit = 1u << slot;
+    u32 result = 0;
+    VblankHandler *handler = &vblank_handlers[slot];
+
+    switch (nid) {
+        case 0xca04a2b9:
+            if (handler->entry) {
+                result = 0x80020067u;
+            } else {
+                handler->entry = entry;
+                handler->argument = argument;
+            }
+            break;
+        case 0xd61e6961:
+            if (!handler->entry) {
+                result = 0x80020068u;
+            } else {
+                handler->entry = 0;
+                vblank_enabled &= ~bit;
+            }
+            break;
+        case 0xfb8e22ec:
+            if (!vblank_enabled)
+                vblank_next = current_vcount() + 1;
+            vblank_enabled |= bit;
+            break;
+        case 0x8a389411:
+            vblank_enabled &= ~bit;
+            break;
+        default:
+            result = 0x80020068u;
+            break;
+    }
+
+    psbridge_resume_intr(flags);
+    return result;
 }
 
 static void wait_vblank(u32 cycles, int use_callbacks)
@@ -64,17 +144,12 @@ static void wait_vblank(u32 cycles, int use_callbacks)
     u64 current;
     u64 target;
 
-    if (!vblank_ready) {
-        vblank_epoch = now;
-        vblank_ready = 1;
-    }
-
     if (!cycles)
         cycles = 1;
     if (cycles > 1000)
         cycles = 1000;
 
-    current = (now - vblank_epoch) / VBLANK_DURATION_US;
+    current = display_elapsed(now) / VBLANK_DURATION_US;
     target = vblank_epoch + (current + cycles) * VBLANK_DURATION_US;
 
     while ((now = current_time()) < target) {
@@ -87,6 +162,8 @@ static void wait_vblank(u32 cycles, int use_callbacks)
             psbridge_delay_thread((u32)remaining, 1);
         else
             DelayThread((int)remaining);
+
+        psbridge_vblank_interrupts();
     }
 }
 
@@ -400,6 +477,10 @@ u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
     if (nid == 0x9c6eaad7)
         return current_vcount();
 
+    if (nid == 0x210eab3a)
+        return (display_elapsed(current_time()) * DISPLAY_LINES_PER_FRAME /
+                VBLANK_DURATION_US) & 0x7fffffffu;
+
     if (
         nid == 0x984c27e7 ||
         nid == 0x46f186c3 ||
@@ -413,6 +494,41 @@ u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
     }
 
     return 0;
+}
+
+#define MPEG_STREAM_LIMIT 32
+#define MPEG_INVALID_VALUE 0x806101feu
+
+typedef struct {
+    u32 type;
+    u32 channel;
+    u32 mode;
+    int registered;
+} MpegStream;
+
+typedef struct {
+    char signature[12];
+    u32 reserved;
+    u32 ring_address;
+    u32 ring_data_end;
+    u32 es_buffers;
+    MpegStream streams[MPEG_STREAM_LIMIT];
+} MpegContext;
+
+static void *mpeg_pointer(u32 address, u32 size)
+{
+    u32 physical = address & 0x1fffffffu;
+    if ((address >= 0x80000000u && address < 0xc0000000u) &&
+        physical >= 0x100000u && physical < 0x2000000u && size <= 0x2000000u - physical)
+        return (void *)(uintptr_t)address;
+    return psbridge_ram_pointer(address, size);
+}
+
+static MpegContext *mpeg_context(u32 address)
+{
+    const u32 *handle = mpeg_pointer(address, sizeof(*handle));
+    MpegContext *context = handle ? mpeg_pointer(*handle, sizeof(*context)) : NULL;
+    return context && !memcmp(context->signature, "LIBMPEG", 8) ? context : NULL;
 }
 
 u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
@@ -445,19 +561,37 @@ u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
         }
         case 0x682a619b:
         case 0x874624d6:
-        case 0x606a4649:
         case 0x13407f13:
-        case 0x591a4aa2:
         case 0x707b7629:
-        case 0xceb870b1:
         case 0x4571cc64:
-        case 0x740fccd1:
-        case 0x0e3c2e9d:
             return 0;
         case 0xc132e22f:
             return 0x10000;
-        case 0xd8c5f121:
+        case 0xd8c5f121: {
+            u32 *handle = mpeg_pointer(a0, sizeof(*handle));
+            u32 *ring = mpeg_pointer(a3, 44);
+            MpegContext *context;
+            if (!handle || a2 < 0x10000 || (!ring && a3) || !mpeg_pointer(a1, a2))
+                return MPEG_INVALID_VALUE;
+            context = mpeg_pointer(a1 + 0x30, sizeof(*context));
+            memset(context, 0, sizeof(*context));
+            memcpy(context->signature, "LIBMPEG\0" "001", sizeof(context->signature));
+            context->reserved = (u32)-1;
+            context->ring_address = a3;
+            if (ring) {
+                context->ring_data_end = ring[8];
+                ring[10] = a0;
+            }
+            *handle = a1 + 0x30;
             return 0;
+        }
+        case 0x606a4649: {
+            MpegContext *context = mpeg_context(a0);
+            if (!context)
+                return MPEG_INVALID_VALUE;
+            memset(context, 0, sizeof(*context));
+            return 0;
+        }
         case 0xd7a29f46:
             return a0 > 0 && a0 < 0x8000 ? a0 * 2152u : 0;
         case 0x21ff80e4:
@@ -477,10 +611,51 @@ u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
             *result = nid == 0x21ff80e4 ? offset : stream_size;
             return 0;
         }
-        case 0x42560f23:
-            return (a1 & 0xffu) + 1;
-        case 0xa780cf7e:
-            return 1;
+        case 0x42560f23: {
+            MpegContext *context = mpeg_context(a0);
+            if (!context)
+                return MPEG_INVALID_VALUE;
+            for (i = 0; i < MPEG_STREAM_LIMIT; ++i) {
+                MpegStream *stream = &context->streams[i];
+                if (stream->registered)
+                    continue;
+                *stream = (MpegStream){ .type = a1, .channel = a2, .registered = 1 };
+                return i + 1;
+            }
+            return MPEG_INVALID_VALUE;
+        }
+        case 0x591a4aa2:
+        case 0x9dcfb7ea: {
+            MpegContext *context = mpeg_context(a0);
+            if (!context || !a1 || a1 > MPEG_STREAM_LIMIT || !context->streams[a1 - 1].registered)
+                return MPEG_INVALID_VALUE;
+            if (nid == 0x591a4aa2)
+                context->streams[a1 - 1] = (MpegStream){0};
+            else if (a2 <= 1)
+                context->streams[a1 - 1].mode = a2;
+            else
+                return MPEG_INVALID_VALUE;
+            return 0;
+        }
+        case 0xa780cf7e: {
+            MpegContext *context = mpeg_context(a0);
+            if (!context)
+                return 0;
+            for (i = 0; i < 2; ++i) {
+                if (context->es_buffers & (1u << i))
+                    continue;
+                context->es_buffers |= 1u << i;
+                return i + 1;
+            }
+            return 0;
+        }
+        case 0xceb870b1: {
+            MpegContext *context = mpeg_context(a0);
+            if (!context || !a1 || a1 > 2)
+                return MPEG_INVALID_VALUE;
+            context->es_buffers &= ~(1u << (a1 - 1));
+            return 0;
+        }
         case 0xb5f6dc87: {
             u32 *ring = psbridge_game_pointer((void *)(uintptr_t)a0);
             if (!ring || !ring[0] || ring[0] > 8192u)
@@ -510,10 +685,21 @@ u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
             return 0x80618001u;
         case 0x800c44df:
             return 0x80618001u;
+        case 0x0e3c2e9d:
+        case 0x740fccd1: {
+            u32 *status = mpeg_pointer(nid == 0x0e3c2e9d ? a4 : a3, sizeof(*status));
+            if (!mpeg_context(a0) || !status)
+                return MPEG_INVALID_VALUE;
+            *status = 0;
+            return nid == 0x740fccd1 ? 0 : 0x80618001u;
+        }
         case 0x167afd9e: {
-            u32 *au = psbridge_game_pointer((void *)(uintptr_t)a2);
-            if (au)
-                memset(au, 0, 24);
+            u32 *au = mpeg_pointer(a2, 24);
+            if (!mpeg_context(a0) || !au)
+                return MPEG_INVALID_VALUE;
+            au[0] = au[1] = au[2] = au[3] = (u32)-1;
+            au[4] = a1;
+            au[5] = 0;
             return 0;
         }
         case 0xf8dcb679: {

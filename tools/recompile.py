@@ -4,6 +4,7 @@
 import struct
 import sys
 import mmap
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 
 from allegrex import branch_names, vfpu_branches, decode, target_of
@@ -29,6 +30,79 @@ def read_game_code(elf, data, segments, absolute=False):
         names.add(instruction[0])
 
     return code, names, base
+
+
+def read_relocated_code(data, segments, code, references):
+    jump_sites = sorted(references["relocated_jumps"] - code.keys())
+    if not jump_sites:
+        return {}
+
+    image_base = min(vaddr - offset for offset, vaddr, *_ in segments)
+    words = references["relocated_words"]
+    data_sites = sorted(image_base + offset for offset in words if image_base + offset not in code)
+    ranges = []
+    for _, start, size, _, flags, _ in segments:
+        if not flags & 1:
+            continue
+
+        end = start + size
+        jumps = jump_sites[bisect_left(jump_sites, start):bisect_left(jump_sites, end)]
+        last_end = start
+        for address in jumps:
+            if address < last_end:
+                continue
+
+            index = bisect_left(data_sites, address)
+            if index < len(data_sites) and data_sites[index] == address:
+                continue
+
+            first = max(start, data_sites[index - 1] + 4) if index else start
+            last_end = min(end, data_sites[index]) if index < len(data_sites) else end
+            ranges.append((first, last_end))
+
+    ranges.sort()
+    starts = [start for start, _ in ranges]
+
+    def in_range(address):
+        index = bisect_right(starts, address) - 1
+        return index >= 0 and address + 4 <= ranges[index][1] and address % 4 == 0
+
+    pending = (set(words.values()) | references["relocated_pointers"] |
+               {target_of(instruction) for instruction in code.values()})
+    pending.discard(None)
+    pending = {address for address in pending if address not in code and in_range(address)}
+    discovered = {}
+
+    while pending:
+        address = pending.pop()
+        while address not in code and address not in discovered and in_range(address):
+            instruction = decode(address, read_word(data, segments, address))
+            name = instruction[0]
+            if name == "word":
+                break
+
+            if name in branch_names or name in ("j", "jal", "jr", "jalr"):
+                if not in_range(address + 4) and address + 4 not in code:
+                    break
+                delay = decode(address + 4, read_word(data, segments, address + 4))
+                if delay[0] == "word":
+                    break
+
+                discovered[address] = instruction
+                if address + 4 not in code:
+                    discovered[address + 4] = delay
+                target = target_of(instruction)
+                if target is not None and target not in code and in_range(target):
+                    pending.add(target)
+
+                if name in ("j", "jr"):
+                    break
+                address += 8
+            else:
+                discovered[address] = instruction
+                address += 4
+
+    return discovered
 
 
 def read_embedded_elf(path, position):
@@ -218,6 +292,15 @@ def recompile(input_path, output_path):
     imports = read_imports(data, segments, module)
     code, names, base = read_game_code(elf, data, segments, absolute=absolute)
     image_base = min(vaddr - offset for offset, vaddr, *_ in segments)
+    relocated_code = read_relocated_code(data, segments, code, references)
+    code.update(relocated_code)
+    names.update(instruction[0] for instruction in relocated_code.values())
+    references["words"].update(
+        (offset, target) for offset, target in references["relocated_words"].items()
+        if target in relocated_code
+    )
+    references["targets"].update(references["words"].values())
+    references["targets"].update(references["relocated_pointers"] & relocated_code.keys())
     overlays = []
 
     input_dir = input_path.parent

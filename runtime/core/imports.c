@@ -42,9 +42,15 @@ static u64 system_time(void)
 #define LIB_ATRAC 0x75263ea8
 #define LIB_STDIO 0x402828c6
 #define LIB_MPEG 0xe03657a3
+#define LIB_INTERRUPT 0xbdbac14f
 
 u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 callsite)
 {
+    psbridge_vblank_interrupts();
+
+    if (import->library == LIB_INTERRUPT)
+        return psbridge_subinterrupt(import->nid, a0, a1, a2, a3);
+
     if (import->library == LIB_SYSMEM) {
         if (import->nid == 0x13a5abef)
             return 0;
@@ -179,7 +185,7 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
         if (import->nid == 0x092968f4)
             return psbridge_suspend_intr();
 
-        if (import->nid == 0x5f10d406) {
+        if (import->nid == 0x5f10d406 || import->nid == 0x3b84732d) {
             psbridge_resume_intr(a0);
             return 0;
         }
@@ -316,7 +322,13 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
         if (import->nid == 0x71bc9871)
             return psbridge_change_thread_priority((int)a0, (int)a1);
 
-        if (import->nid == 0xaa73c935) {
+        if (import->nid == 0x94aa61ee)
+            return psbridge_current_thread_priority();
+
+        if (import->nid == 0x17c1684e)
+            return psbridge_refer_thread_status((int)a0, (void *)(uintptr_t)a1);
+
+        if (import->nid == 0xaa73c935 || import->nid == 0x809ce29b) {
             psbridge_exit_guest_thread((int)a0);
             return 0;
         }
@@ -373,7 +385,10 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             return psbridge_check_callbacks();
 
         if (import->nid == 0x55c20a00)
-            return psbridge_create_event(a1, a2);
+            return psbridge_create_event((const char *)(uintptr_t)a0, a1, a2);
+
+        if (import->nid == 0xa66b0120)
+            return psbridge_refer_event_status((int)a0, (void *)(uintptr_t)a1);
 
         if (import->nid == 0xef9e4c70)
             return psbridge_delete_event((int)a0);

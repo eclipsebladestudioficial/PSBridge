@@ -16,9 +16,20 @@
 typedef struct {
     int used;
     int uid;
+    char name[32];
     u32 attributes;
+    u32 initial;
     u32 pattern;
 } EventFlag;
+
+typedef struct {
+    u32 size;
+    char name[32];
+    u32 attributes;
+    u32 initial;
+    u32 pattern;
+    int waiters;
+} EventFlagStatus;
 
 typedef struct {
     int used;
@@ -38,6 +49,16 @@ static int sync_lock = -1;
 static int intr_gate = -1;
 static volatile int intr_owner = -1;
 static volatile u32 intr_depth;
+
+int psbridge_try_enter_intr(void)
+{
+    if (intr_gate < 0 || PollSema(intr_gate) < 0)
+        return 0;
+
+    intr_owner = GetThreadId();
+    intr_depth = 1;
+    return 1;
+}
 
 u32 psbridge_suspend_intr(void)
 {
@@ -128,7 +149,7 @@ static Callback *find_callback(int uid)
     return NULL;
 }
 
-int psbridge_create_event(u32 attributes, u32 initial)
+int psbridge_create_event(const char *name, u32 attributes, u32 initial)
 {
     int index;
     int uid;
@@ -136,6 +157,7 @@ int psbridge_create_event(u32 attributes, u32 initial)
     if (psbridge_sync_init() < 0)
         return -1;
 
+    name = name ? psbridge_game_pointer(name) : NULL;
     WaitSema(sync_lock);
 
     for (index = 0; index < EVENT_LIMIT; index++) {
@@ -145,7 +167,10 @@ int psbridge_create_event(u32 attributes, u32 initial)
         uid = next_event_uid++;
         event_flags[index].used = 1;
         event_flags[index].uid = uid;
+        if (name)
+            strncpy(event_flags[index].name, name, sizeof(event_flags[index].name) - 1);
         event_flags[index].attributes = attributes;
+        event_flags[index].initial = initial;
         event_flags[index].pattern = initial;
         SignalSema(sync_lock);
         return uid;
@@ -153,6 +178,37 @@ int psbridge_create_event(u32 attributes, u32 initial)
 
     SignalSema(sync_lock);
     return -1;
+}
+
+int psbridge_refer_event_status(int uid, void *output)
+{
+    u32 *data = output ? psbridge_game_pointer(output) : NULL;
+    EventFlagStatus info;
+    EventFlag *event;
+    u32 size;
+
+    if (sync_lock < 0)
+        return BAD_ID;
+    if (!data)
+        return (int)0x800200d3u;
+
+    WaitSema(sync_lock);
+    event = find_event(uid);
+    if (!event) {
+        SignalSema(sync_lock);
+        return BAD_ID;
+    }
+    info.size = sizeof(info);
+    memcpy(info.name, event->name, sizeof(info.name));
+    info.attributes = event->attributes;
+    info.initial = event->initial;
+    info.pattern = event->pattern;
+    info.waiters = psbridge_count_thread_waits(PSP_WAIT_EVENT, uid);
+    SignalSema(sync_lock);
+
+    size = *data;
+    memcpy(data, &info, size < sizeof(info) ? size : sizeof(info));
+    return 0;
 }
 
 int psbridge_delete_event(int uid)
@@ -221,6 +277,9 @@ int psbridge_wait_event(int uid, u32 bits, u32 mode, void *output, void *timeout
     u32 *remaining = timeout ? psbridge_game_pointer(timeout) : NULL;
     u32 limit = remaining ? *remaining : 0;
     u64 started = current_time();
+    PspThreadWait previous = {0};
+    int waiting = 0;
+    int status;
 
     if ((!result && output) || (!remaining && timeout) || !bits || (mode & ~0x31u))
         return -1;
@@ -239,7 +298,8 @@ int psbridge_wait_event(int uid, u32 bits, u32 mode, void *output, void *timeout
 
         if (!event) {
             SignalSema(sync_lock);
-            return BAD_ID;
+            status = waiting ? WAIT_DELETE : BAD_ID;
+            break;
         }
 
         pattern = event->pattern;
@@ -263,7 +323,8 @@ int psbridge_wait_event(int uid, u32 bits, u32 mode, void *output, void *timeout
                 *remaining = elapsed >= limit ? 0 : limit - (u32)elapsed;
             }
 
-            return 0;
+            status = 0;
+            break;
         }
 
         if (polling)
@@ -273,7 +334,13 @@ int psbridge_wait_event(int uid, u32 bits, u32 mode, void *output, void *timeout
 
         if (remaining && elapsed >= limit) {
             *remaining = 0;
-            return WAIT_TIMEOUT;
+            status = WAIT_TIMEOUT;
+            break;
+        }
+
+        if (!waiting) {
+            previous = psbridge_set_thread_wait((PspThreadWait){PSP_WAIT_EVENT, uid});
+            waiting = 1;
         }
 
         if (use_callbacks)
@@ -290,6 +357,10 @@ int psbridge_wait_event(int uid, u32 bits, u32 mode, void *output, void *timeout
             DelayThread(delay);
         }
     }
+
+    if (waiting)
+        psbridge_set_thread_wait(previous);
+    return status;
 }
 
 int psbridge_create_callback(u32 function, u32 common)
@@ -450,12 +521,21 @@ int psbridge_check_callbacks(void)
     return fired;
 }
 
+static int delay_guest_thread(u32 delay)
+{
+    PspThreadWait previous = psbridge_set_thread_wait((PspThreadWait){PSP_WAIT_DELAY, 0});
+    int result = DelayThread((int)delay);
+
+    psbridge_set_thread_wait(previous);
+    return result;
+}
+
 int psbridge_delay_thread(u32 delay, int use_callbacks)
 {
     u64 started;
 
     if (!use_callbacks)
-        return DelayThread((int)delay);
+        return delay_guest_thread(delay);
 
     started = current_time();
     psbridge_check_callbacks();
@@ -472,7 +552,7 @@ int psbridge_delay_thread(u32 delay, int use_callbacks)
         if (remaining > 2000)
             remaining = 2000;
 
-        DelayThread(remaining);
+        delay_guest_thread(remaining);
         psbridge_check_callbacks();
     }
 }

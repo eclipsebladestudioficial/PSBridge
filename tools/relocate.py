@@ -149,6 +149,9 @@ def find_code_references(image, programs, sections, tables, base, image_start):
 
     targets = set()
     words = {}
+    relocated_words = {}
+    relocated_jumps = set()
+    relocated_pointers = set()
     high = {}
     low_fixups = {}
 
@@ -169,11 +172,17 @@ def find_code_references(image, programs, sections, tables, base, image_start):
             word = struct.unpack_from("<I", image, offset)[0]
 
             if kind == 2:
+                relocated_words[offset] = word
                 if add_pointer(word):
                     if offset in words and words[offset] != word:
                         raise ValueError(f"o ponteiro em 0x{offset:08x} apontou pra dois lugares")
 
                     words[offset] = word
+                continue
+
+            if kind == 4:
+                if word >> 26 in (2, 3):
+                    relocated_jumps.add(base + image_start + offset)
                 continue
 
             if kind != 5:
@@ -188,6 +197,7 @@ def find_code_references(image, programs, sections, tables, base, image_start):
             low_word = struct.unpack_from("<I", image, next_offset)[0]
             value = ((word & 0xffff) << 16) + signed(low_word & 0xffff)
             value &= 0xffffffff
+            relocated_pointers.add(value)
 
             if not add_pointer(value):
                 continue
@@ -208,6 +218,9 @@ def find_code_references(image, programs, sections, tables, base, image_start):
     return {
         "targets": targets,
         "words": words,
+        "relocated_words": relocated_words,
+        "relocated_jumps": relocated_jumps,
+        "relocated_pointers": relocated_pointers,
         "high": high,
         "low": low_fixups,
     }

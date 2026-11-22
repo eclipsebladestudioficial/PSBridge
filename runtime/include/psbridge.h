@@ -77,7 +77,22 @@ int psbridge_lock_mutex(int uid, int count, void *timeout, int try_only);
 int psbridge_unlock_mutex(int uid, int count);
 int psbridge_delete_mutex(int uid);
 int psbridge_change_thread_priority(int uid, int priority);
+int psbridge_current_thread_priority(void);
+int psbridge_refer_thread_status(int uid, void *output);
 void psbridge_exit_guest_thread(int status);
+
+enum {
+    PSP_WAIT_DELAY = 2,
+    PSP_WAIT_EVENT = 4
+};
+
+typedef struct {
+    u32 type;
+    int uid;
+} PspThreadWait;
+
+PspThreadWait psbridge_set_thread_wait(PspThreadWait wait);
+int psbridge_count_thread_waits(u32 type, int uid);
 
 int psbridge_create_thread(const char *name, void *entry, int priority, int stack_size, u32 attributes, void *options);
 
@@ -134,8 +149,12 @@ int psbridge_delete_mailbox(int uid);
 
 u32 psbridge_suspend_intr(void);
 void psbridge_resume_intr(u32 flags);
+int psbridge_try_enter_intr(void);
+void psbridge_vblank_interrupts(void);
+u32 psbridge_subinterrupt(u32 nid, u32 interrupt, u32 slot, u32 entry, u32 argument);
 int psbridge_sync_init(void);
-int psbridge_create_event(u32 attributes, u32 initial);
+int psbridge_create_event(const char *name, u32 attributes, u32 initial);
+int psbridge_refer_event_status(int uid, void *output);
 int psbridge_delete_event(int uid);
 int psbridge_set_event(int uid, u32 bits);
 int psbridge_clear_event(int uid, u32 mask);

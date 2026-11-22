@@ -9,7 +9,8 @@
 
 #define THREAD_ARG_SIZE 256
 #define THREAD_LIMIT 64
-#define THREAD_STACK_MIN 0x8000
+#define THREAD_STACK_MIN 0x4000
+#define THREAD_STACK_OVERHEAD 0x2000
 #define THREAD_STACK_MAX 0x100000
 #define KERNEL_STACK_SIZE 0x1000
 #define MAILBOX_LIMIT 8
@@ -19,7 +20,10 @@ typedef struct {
     int used;
     int uid;
     int thread_id;
+    char name[32];
+    u32 attributes;
     void *entry;
+    PspThreadWait wait;
     u32 arg_size;
     void *arg;
     unsigned char arg_copy[THREAD_ARG_SIZE];
@@ -28,6 +32,28 @@ typedef struct {
     u32 stack_capacity;
     u32 stack_size;
 } PspThread;
+
+typedef struct {
+    u32 size;
+    char name[32];
+    u32 attributes;
+    u32 status;
+    u32 entry;
+    u32 stack;
+    u32 stack_size;
+    u32 gp;
+    int initial_priority;
+    int current_priority;
+    u32 wait_type;
+    int wait_uid;
+    u32 wakeup_count;
+    int exit_status;
+    u32 run_clocks[2];
+    u32 interrupt_preempts;
+    u32 thread_preempts;
+    u32 releases;
+    u32 reserved;
+} PspThreadStatus;
 
 typedef struct {
     int used;
@@ -57,6 +83,7 @@ typedef struct {
 #define FINISHED_THREAD_LIMIT 128
 
 static PspThread threads[THREAD_LIMIT];
+static PspThreadWait main_thread_wait;
 static FinishedPspThread finished_threads[FINISHED_THREAD_LIMIT];
 static u32 finished_thread_count;
 static int next_thread_uid = 0x100;
@@ -164,6 +191,40 @@ static PspThread *find_thread(int uid)
     return NULL;
 }
 
+static PspThread *find_thread_by_host_id(int id)
+{
+    for (int index = 0; index < THREAD_LIMIT; index++) {
+        if (threads[index].used > 0 && threads[index].thread_id == id)
+            return &threads[index];
+    }
+    return NULL;
+}
+
+PspThreadWait psbridge_set_thread_wait(PspThreadWait wait)
+{
+    PspThread *thread = find_thread_by_host_id(GetThreadId());
+    PspThreadWait *current = thread ? &thread->wait : &main_thread_wait;
+    int interrupt_state = DIntr();
+    PspThreadWait previous = *current;
+
+    *current = wait;
+    if (interrupt_state)
+        EIntr();
+    return previous;
+}
+
+int psbridge_count_thread_waits(u32 type, int uid)
+{
+    int count = main_thread_wait.type == type && main_thread_wait.uid == uid;
+
+    for (int index = 0; index < THREAD_LIMIT; index++) {
+        PspThread *thread = &threads[index];
+        if (thread->used > 0 && thread->wait.type == type && thread->wait.uid == uid)
+            count++;
+    }
+    return count;
+}
+
 static PspMailbox *find_mailbox(int uid)
 {
     int index;
@@ -211,22 +272,32 @@ static void run_thread(void *arg)
 int psbridge_create_thread(const char *name, void *entry, int priority, int stack_size, u32 attributes, void *options)
 {
     int interrupt_state;
-    int index;
     u32 needed;
-    PspThread *thread;
+    u32 capacity;
+    PspThread *thread = NULL;
     ee_thread_t config;
     int thread_id;
-    (void)attributes;
     (void)options;
 
-    if (stack_size > THREAD_STACK_MAX)
+    if (stack_size < 0 || stack_size > THREAD_STACK_MAX)
         return -1;
-    needed = stack_size < THREAD_STACK_MIN ? THREAD_STACK_MIN : ((u32)stack_size + 15) & ~15u;
+    needed = ((u32)stack_size + THREAD_STACK_OVERHEAD + 15) & ~15u;
+    if (needed < THREAD_STACK_MIN)
+        needed = THREAD_STACK_MIN;
+    capacity = needed + KERNEL_STACK_SIZE;
 
     interrupt_state = DIntr();
-    for (index = 0; index < THREAD_LIMIT && threads[index].used; index++)
-        ;
-    thread = index < THREAD_LIMIT ? &threads[index] : NULL;
+    for (int index = 0; index < THREAD_LIMIT; index++) {
+        PspThread *candidate = &threads[index];
+
+        if (candidate->used)
+            continue;
+        if (!thread ||
+            (candidate->stack_capacity >= capacity &&
+             (thread->stack_capacity < capacity || candidate->stack_capacity < thread->stack_capacity)) ||
+            (candidate->stack_capacity < capacity && candidate->stack_capacity > thread->stack_capacity))
+            thread = candidate;
+    }
     if (thread)
         thread->used = -1;
     if (interrupt_state)
@@ -234,15 +305,15 @@ int psbridge_create_thread(const char *name, void *entry, int priority, int stac
     if (!thread)
         return -1;
 
-    if (thread->stack_capacity < needed + KERNEL_STACK_SIZE) {
-        void *stack = psbridge_resize_thread_stack(thread->stack_buffer, needed + KERNEL_STACK_SIZE);
+    if (thread->stack_capacity < capacity) {
+        void *stack = psbridge_resize_thread_stack(thread->stack_buffer, capacity);
 
         if (!stack) {
             thread->used = 0;
             return -1;
         }
         thread->stack_buffer = stack;
-        thread->stack_capacity = needed + KERNEL_STACK_SIZE;
+        thread->stack_capacity = capacity;
     }
 
     if (priority < 2)
@@ -264,7 +335,13 @@ int psbridge_create_thread(const char *name, void *entry, int priority, int stac
     }
 
     thread->thread_id = thread_id;
+    name = name ? psbridge_game_pointer(name) : NULL;
+    memset(thread->name, 0, sizeof(thread->name));
+    if (name)
+        strncpy(thread->name, name, sizeof(thread->name) - 1);
+    thread->attributes = attributes;
     thread->entry = entry;
+    thread->wait = (PspThreadWait){0};
     thread->stack_size = needed;
     thread->kernel_work = (u8 *)thread->stack_buffer + needed;
     interrupt_state = DIntr();
@@ -550,28 +627,16 @@ int psbridge_receive_mailbox(int uid, void *output, void *timeout)
 void *psbridge_thread_kernel_work(void)
 {
     extern u32 main_kernel_work[];
-    int current = GetThreadId();
-    int index;
+    PspThread *thread = find_thread_by_host_id(GetThreadId());
 
-    for (index = 0; index < THREAD_LIMIT; index++) {
-        if (threads[index].used > 0 && threads[index].thread_id == current)
-            return threads[index].kernel_work;
-    }
-
-    return main_kernel_work;
+    return thread ? thread->kernel_work : main_kernel_work;
 }
 
 int psbridge_psp_thread_uid(void)
 {
-    int current = GetThreadId();
-    int index;
+    PspThread *thread = find_thread_by_host_id(GetThreadId());
 
-    for (index = 0; index < THREAD_LIMIT; index++) {
-        if (threads[index].used > 0 && threads[index].thread_id == current)
-            return threads[index].uid;
-    }
-
-    return 1;
+    return thread ? thread->uid : 1;
 }
 
 int psbridge_delete_mailbox(int uid)
@@ -599,6 +664,63 @@ int psbridge_change_thread_priority(int uid, int priority)
     if (!thread)
         return -1;
     return ChangeThreadPriority(thread->thread_id, priority);
+}
+
+int psbridge_current_thread_priority(void)
+{
+    ee_thread_status_t status;
+    int result = ReferThreadStatus(GetThreadId(), &status);
+
+    return result < 0 ? result : status.current_priority;
+}
+
+int psbridge_refer_thread_status(int uid, void *output)
+{
+    int current = GetThreadId();
+    PspThread *thread = uid ? find_thread(uid) : find_thread_by_host_id(current);
+    u32 *data = output ? psbridge_game_pointer(output) : NULL;
+    PspThreadStatus info = {0};
+    ee_thread_status_t host;
+    u32 size;
+
+    if (uid && !thread && (uid != 1 || find_thread_by_host_id(current)))
+        return (int)0x80020198u;
+    if (!data)
+        return (int)0x800200d3u;
+    size = *data;
+    if (size > sizeof(info))
+        return (int)0x800201bcu;
+    if (ReferThreadStatus(thread ? thread->thread_id : current, &host) < 0)
+        return (int)0x80020198u;
+
+    info.size = size > 104 ? sizeof(info) : 104;
+    info.status = host.status;
+    info.gp = guest_info.gp;
+    info.initial_priority = host.initial_priority;
+    info.current_priority = host.current_priority;
+    info.wakeup_count = host.wakeupCount;
+    info.exit_status = (int)0x800201a4u;
+    if (thread) {
+        memcpy(info.name, thread->name, sizeof(info.name));
+        info.attributes = thread->attributes;
+        info.entry = (u32)(uintptr_t)thread->entry;
+        info.stack = (u32)(uintptr_t)thread->stack_buffer;
+        info.stack_size = thread->stack_size;
+    }
+
+    if (host.status & THS_WAIT) {
+        PspThreadWait wait = thread ? thread->wait : main_thread_wait;
+
+        if (wait.type) {
+            info.wait_type = wait.type;
+            info.wait_uid = wait.uid;
+        } else if (host.waitType == TSW_SLEEP) {
+            info.wait_type = 1;
+        }
+    }
+
+    memcpy(data, &info, size);
+    return 0;
 }
 
 void psbridge_exit_guest_thread(int status)
