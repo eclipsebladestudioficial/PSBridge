@@ -4,6 +4,9 @@ PHDRS {
   text PT_LOAD;
 }
 
+__psbridge_ee_ram_end = 0x82000000;
+__psbridge_sdk_heap_reserve = 256 * 1024;
+
 SECTIONS {
 	.text 0x80100000 : AT(0x00100000) {
 		_ftext = . ;
@@ -108,7 +111,8 @@ SECTIONS {
         __psbridge_heap_start = .;
         . += 4;
     } :text
-    .psbridge_heap_limit 0x81f80000 (NOLOAD) : AT(ADDR(.psbridge_heap_limit) - 0x80000000) {
+	.psbridge_heap_limit (__psbridge_ee_ram_end - __psbridge_sdk_heap_reserve - _stack_size)
+        (NOLOAD) : AT(ADDR(.psbridge_heap_limit) - 0x80000000) {
         __psbridge_heap_end = .;
         . += 4;
         _end = . - 0x80000000;
