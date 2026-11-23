@@ -3,7 +3,14 @@
 #include "ge/ge_internal.h"
 
 GeList ge_lists[GE_LIST_LIMIT];
-GeState ge_state;
+GeState ge_state = {
+    .command = {
+        [GE_MATERIALAMBIENT] = 0xffffff,
+        [GE_MATERIALALPHA] = 0xff,
+        [GE_AMBIENTCOLOR] = 0xffffff,
+        [GE_AMBIENTALPHA] = 0xff,
+    },
+};
 int ge_blend_mode_seen;
 volatile u32 ge_ready_buffer;
 volatile u32 ge_ready_sequence;

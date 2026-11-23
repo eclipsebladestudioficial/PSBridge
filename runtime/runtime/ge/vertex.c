@@ -157,6 +157,34 @@ static u32 vertex_mix_color(const float values[4])
     return output;
 }
 
+static u32 vertex_primary_color(u32 color, u32 material, u32 type)
+{
+    const u32 *commands = ge_state.command;
+    if ((type & (1u << 23)) || !(commands[GE_LIGHTING_ENABLE] & 1) ||
+        ((commands[GE_LIGHT_ENABLE0] | commands[GE_LIGHT_ENABLE1] |
+          commands[GE_LIGHT_ENABLE2] | commands[GE_LIGHT_ENABLE3]) & 1))
+        return color;
+
+    if (!(commands[GE_MATERIALUPDATE] & 1) || !(type & (7u << 2)))
+        color = material;
+
+    u32 ambient = commands[GE_AMBIENTCOLOR] |
+        ((commands[GE_AMBIENTALPHA] & 0xff) << 24);
+    u32 emissive = commands[GE_MATERIALEMISSIVE];
+    if (ambient == 0xffffffffu && !emissive)
+        return color;
+
+    u32 result = 0;
+    for (int shift = 0; shift < 32; shift += 8) {
+        u32 a = (color >> shift) & 0xff;
+        u32 b = (ambient >> shift) & 0xff;
+        u32 lit = ((2 * a + 1) * (2 * b + 1) >> 10) +
+            ((emissive >> shift) & 0xff);
+        result |= (lit > 255 ? 255 : lit) << shift;
+    }
+    return result;
+}
+
 GeVertex read_vertex(int number, u32 type, VertexLayout layout)
 {
     int texture = type & 3;
@@ -179,7 +207,9 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
     int i;
 
     memset(&vertex, 0, sizeof(vertex));
-    vertex.color = 0xffffffffu;
+    u32 material = ge_state.command[GE_MATERIALAMBIENT] |
+        ((ge_state.command[GE_MATERIALALPHA] & 0xff) << 24);
+    vertex.color = material;
 
     if (!data || layout.stride <= 0 || layout.target_stride <= 0) {
         return vertex;
@@ -232,6 +262,7 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
     vertex.v = uv_v;
     if (color)
         vertex.color = vertex_mix_color(color_values);
+    vertex.color = vertex_primary_color(vertex.color, material, type);
     if (texture) {
         ge_state.texture_u = vertex.u;
         ge_state.texture_v = vertex.v;
