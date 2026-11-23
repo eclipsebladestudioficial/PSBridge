@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from convert_video import VIDEO_DIRECTORY, prepare_videos
 from elf_reader import read_header
 
 
@@ -135,9 +136,18 @@ def create_disc_view(extracted, destination, image, source):
     disc.mkdir()
     game = disc / "PSP_GAME"
     game.mkdir()
+
+    excluded = {
+        DISC_DIRECTORY,
+        SOURCE_FILENAME,
+        VIDEO_DIRECTORY,
+        "jogo.elf",
+        "UMD_DATA.BIN",
+    }
     for entry in extracted.iterdir():
-        if entry.name not in {DISC_DIRECTORY, SOURCE_FILENAME, "jogo.elf", "UMD_DATA.BIN"}:
+        if entry.name not in excluded:
             (game / entry.name).symlink_to(Path("../..") / entry.name, target_is_directory=entry.is_dir())
+
     (disc / "UMD_DATA.BIN").symlink_to("../UMD_DATA.BIN")
     (disc / "UMD.ISO").symlink_to(os.path.relpath(image, destination / DISC_DIRECTORY))
     with (extracted / SOURCE_FILENAME).open("x") as stamp:
@@ -156,6 +166,7 @@ def extract_iso(image, destination, reuse=False):
         if not reuse or not stamp.is_file():
             raise ValueError("já tem coisa em build/converted/")
         if json.loads(stamp.read_text()) == source and is_game_elf(destination / "jogo.elf"):
+            prepare_videos(destination, source)
             return
 
     with TemporaryDirectory(dir=destination.parent) as staging:
@@ -167,6 +178,7 @@ def extract_iso(image, destination, reuse=False):
             check=True,
         )
         organize_extraction(extracted)
+        prepare_videos(extracted, source)
         create_disc_view(extracted, destination, image, source)
         if iso_source(image) != source:
             raise ValueError("a iso mudou no meio da extração")

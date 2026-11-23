@@ -42,6 +42,7 @@ static u64 system_time(void)
 #define LIB_ATRAC 0x75263ea8
 #define LIB_STDIO 0x402828c6
 #define LIB_MPEG 0xe03657a3
+#define LIB_DMAC 0xc9bed1c5
 #define LIB_INTERRUPT 0xbdbac14f
 
 u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 callsite)
@@ -228,6 +229,21 @@ u64 psbridge_dispatch(const PspImport *import, u32 a0, u32 a1, u32 a2, u32 a3, u
             memset(destination, (int)a1, a2);
             return a0;
         }
+    }
+
+    if (import->library == LIB_DMAC &&
+        (import->nid == 0x617f3fe6u || import->nid == 0xd97f94d8u)) {
+        if (!a2)
+            return 0x80000104u;
+
+        void *destination = psbridge_guest_buffer(a0, a2);
+        const void *source = psbridge_guest_buffer(a1, a2);
+        if (!destination || !source)
+            return 0x80000103u;
+
+        memmove(destination, source, a2);
+        psbridge_graphics_draw_invalidate();
+        return 0;
     }
 
     if (import->library == LIB_MPEG)

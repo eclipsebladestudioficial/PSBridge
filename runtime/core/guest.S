@@ -47,6 +47,7 @@ psbridge_import:
     sd $26, 48($sp)
     sd $27, 40($sp)
     sd $gp, 32($sp)
+    sw $25, 24($sp)
 
     or $11, $ra, $0
     or $10, $9, $0
@@ -66,6 +67,17 @@ psbridge_import:
     sra $2, $2, 0
     sra $3, $3, 0
 
+    lw $8, 24($sp)
+    lui $9, 0xdba6
+    lw $10, 0($8)
+    ori $9, $9, 0xc4c4
+    bne $10, $9, import_return
+    lui $9, 0x1ceb
+    lw $10, 4($8)
+    ori $9, $9, 0xc208
+    beq $10, $9, import_return_float
+    nop
+import_return:
     ld $gp, 32($sp)
     ld $27, 40($sp)
     ld $26, 48($sp)
@@ -73,6 +85,10 @@ psbridge_import:
     addiu $sp, $sp, 64
     jr $ra
     nop
+
+import_return_float:
+    b import_return
+    mtc1 $2, $f0
 
     .end psbridge_import
 

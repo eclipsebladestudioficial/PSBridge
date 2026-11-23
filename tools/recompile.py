@@ -369,7 +369,10 @@ def recompile(input_path, output_path):
     input_dir = input_path.parent
     converted = (input_dir / ".source.json").is_file()
     asset_root = input_dir if converted else input_dir / "build" / "PSP_GAME"
-    excluded = (".disc", ".source.json", input_path.name, "UMD_DATA.BIN") if converted else ()
+    excluded = ()
+    if converted:
+        excluded = (".disc", ".source.json", ".video", input_path.name, "UMD_DATA.BIN")
+
     libraries = read_library_modules(asset_root, image_base + len(data), excluded)
     memory_size = len(data)
     for library in libraries:

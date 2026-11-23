@@ -27,6 +27,7 @@ int psbridge_call_callback(void *entry, u32 count, u32 argument, u32 common);
 
 void *psbridge_game_pointer(const void *pointer);
 void *psbridge_ram_pointer(u32 address, u32 size);
+void *psbridge_guest_buffer(u32 address, u32 size);
 int psbridge_map_game_memory(void);
 void *psbridge_resize_thread_stack(void *old_stack, u32 size);
 void *psbridge_video_memory(void);

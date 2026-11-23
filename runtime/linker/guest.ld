@@ -93,7 +93,7 @@ SECTIONS {
     __psbridge_after_bss = .;
     __psbridge_scratch_start = ALIGN(__psbridge_before_image, 128);
     .runtime_scratch (
-        __psbridge_scratch_start + SIZEOF(.runtime_scratch) <= ADDR(.guest_image)
+        __psbridge_scratch_start + SIZEOF(.runtime_scratch) + 0x40000 <= ADDR(.guest_image)
             ? __psbridge_scratch_start : ALIGN(__psbridge_after_bss, 128)
     ) (NOLOAD) : AT(ADDR(.runtime_scratch) - 0x80000000) {
         *(.runtime_scratch)

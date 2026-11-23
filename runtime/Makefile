@@ -4,7 +4,7 @@ GAME_ELF ?= $(or $(wildcard $(BUILD_DIR)/converted/jogo.elf),../jogo.elf)
 PYTHON ?= python3
 MAIN_OBJ = $(RUNTIME_BUILD)/main.o
 CORE_OBJS = $(addprefix $(RUNTIME_BUILD)/core/,imports.o guest.o vfpu_entry.o)
-API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o video.o io.o pgd.o memory.o module.o threadman.o lwmutex.o sync.o utility.o)
+API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o video.o mpeg.o io.o pgd.o memory.o module.o threadman.o lwmutex.o sync.o utility.o)
 VFPU_OBJS = $(RUNTIME_BUILD)/runtime/vfpu.o $(addprefix $(RUNTIME_BUILD)/runtime/vfpu/,state.o memory.o)
 GE_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/ge/,list.o vertex.o texture.o raster.o hardware.o)
 RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS) $(GE_OBJS)
@@ -12,7 +12,7 @@ RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS) $(GE_OBJS)
 EE_BIN = $(BUILD_DIR)/PSBridge-debug.elf
 STRIPPED_BIN = $(BUILD_DIR)/PSBridge-stripped.elf
 EE_OBJS = $(RUNTIME_OBJS) $(BUILD_DIR)/game.o
-EE_LIBS = -L$(GSKIT)/lib -lgskit -ldmakit -ldebug -lm -lc -lpad -L$(PS2SDK)/ports/lib -lwolfssl
+EE_LIBS = -L$(GSKIT)/lib -lgskit -ldmakit -ldebug -lm -lc -lpad -L$(PS2SDK)/ports/lib -lwolfssl -ljpeg
 EE_INCS += -I$(CURDIR)/include -I$(GSKIT)/include -I$(PS2SDK)/ports/include
 EE_LINKFILE = $(CURDIR)/linker/guest.ld
 EE_ASFLAGS += -I$(abspath ..)
@@ -24,7 +24,7 @@ all: $(EE_BIN) $(STRIPPED_BIN)
 
 -include $(RUNTIME_OBJS:.o=.d)
 
-$(EE_BIN): linker/guest.ld
+$(EE_BIN): linker/guest.ld Makefile
 
 $(STRIPPED_BIN): $(EE_BIN)
 	cp $< $@

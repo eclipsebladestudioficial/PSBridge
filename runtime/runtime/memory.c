@@ -296,6 +296,17 @@ void *psbridge_ram_pointer(u32 address, u32 size)
     return (void *)(uintptr_t)(physical | (uncached ? 0xa0000000 : 0x80000000));
 }
 
+void *psbridge_guest_buffer(u32 address, u32 size)
+{
+    u32 physical = address & 0x1fffffffu;
+    if ((address >= 0x80000000u && address < 0xc0000000u) &&
+        physical >= 0x100000u && physical < 0x2000000u && size <= 0x2000000u - physical)
+        return (void *)(uintptr_t)address;
+    if (physical >= 0x04000000 && physical < 0x04200000 && size <= 0x04200000 - physical)
+        return (u8 *)psbridge_video_memory() + physical - 0x04000000;
+    return psbridge_ram_pointer(address, size);
+}
+
 void *psbridge_game_pointer(const void *pointer)
 {
     u32 address = (u32)(uintptr_t)pointer;
