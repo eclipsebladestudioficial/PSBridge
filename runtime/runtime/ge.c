@@ -36,7 +36,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_ge(u32 nid, u32 a0, u3
     if (nid == 0x1f6752ad) {
         static unsigned vramsinha;
         if (vramsinha++ < 4)
-            PRINT_LOG("ge contou a vramsinha %u bytes\n", 0x200000u);
+            PSB_LOG(GE, "ge contou a vramsinha %u bytes", 0x200000u);
         return 0x200000u;
     }
 

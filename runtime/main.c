@@ -21,10 +21,10 @@ int main(void)
 {
     sceSifInitRpc(0);
 
-    PRINT_LOG("PSBridge levantou a frica\n");
-    PRINT_LOG("memoria do jogo %u bytes\n", guest_info.memory_size);
-    PRINT_LOG("heap do jogo gozando %u bytes\n", (u32)((uintptr_t)__psbridge_heap_end - (uintptr_t)__psbridge_heap_start));
-    PRINT_LOG("imports na fila do sus %u\n", psp_import_count);
+    PSB_LOG(BOOT, "PSBridge levantou a frica");
+    PSB_LOG(BOOT, "memoria do jogo %u bytes", guest_info.memory_size);
+    PSB_LOG(BOOT, "heap do jogo gozando %u bytes", (u32)((uintptr_t)__psbridge_heap_end - (uintptr_t)__psbridge_heap_start));
+    PSB_LOG(BOOT, "imports na fila do sus %u", psp_import_count);
 
     memset(
         (u8 *)guest_info.memory + guest_info.file_size,
@@ -39,13 +39,13 @@ int main(void)
         return -1;
 
     if (psbridge_sync_init() < 0 || psbridge_memory_init() < 0) {
-        PRINT_LOG("memoria nao conseguiu abrir a tranca da putaria\n");
+        PSB_LOG(BOOT, "memoria nao conseguiu abrir a tranca da putaria");
         return -1;
     }
 
-    PRINT_LOG("pulando pro jogo\n");
+    PSB_LOG(BOOT, "pulando pro jogo");
     int result = psbridge_start();
-    PRINT_LOG("o jogo voltou com %d\n", result);
+    PSB_LOG(BOOT, "o jogo voltou com %d", result);
 
     SleepThread();
     return result;

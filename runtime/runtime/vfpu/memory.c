@@ -26,7 +26,7 @@ void *vfpu_checked_pointer(u32 raw, u32 bytes)
         return (void *)(uintptr_t)(a | 0x80000000u);
 bad:
     if (vfpu_invalid_memory < 12)
-        PRINT_LOG("vfpu tentou gozar em ponteiro furado %08lx tamanho %lu\n",
+        PSB_LOG(VFPU, "vfpu tentou gozar em ponteiro furado %08lx tamanho %lu",
                (unsigned long)raw, (unsigned long)bytes);
     vfpu_invalid_memory++;
     vfpu_last_invalid_address = raw;

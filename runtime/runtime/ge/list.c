@@ -32,7 +32,7 @@ int register_ge_callback(u32 address)
             cb->signal_arg = data[1];
             cb->finish_function = data[2];
             cb->finish_arg = data[3];
-            PRINT_LOG("ge cadastrou callback safada id %d sinal %08x fim %08x\n",
+            PSB_LOG(GE, "ge cadastrou callback safada id %d sinal %08x fim %08x",
                 cb->id, cb->signal_function, cb->finish_function);
             return cb->id;
         }
@@ -53,7 +53,7 @@ static void fire_ge_callback(int callback_id, int finish, u32 data)
         return;
     diag_ge_callbacks++;
     if (diag_ge_callbacks <= 16 || (diag_ge_callbacks % 128 == 0))
-        PRINT_LOG("ge callback %s gozou id %d dado %08x endereco %08x vezes %u\n",
+        PSB_LOG(GE, "ge callback %s gozou id %d dado %08x endereco %08x vezes %u",
             finish ? "fim" : "sinal", callback_id, data, function, diag_ge_callbacks);
     psbridge_call_callback((void *)(uintptr_t)function, data, argument, 0);
 }

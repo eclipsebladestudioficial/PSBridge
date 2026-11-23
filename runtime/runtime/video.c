@@ -270,7 +270,7 @@ void psbridge_video_log_frame(u32 frame_count)
 {
     if (frame_count <= 4 || frame_count % 120 == 0) {
         const u32 *pixels = (const u32 *)framebuffer_pointer(framebuffer);
-        PSB_LOG(GE, "frame gozando numero %u endereco %08x largura %d formato %d pixel %08x", frame_count, (u32)(uintptr_t)framebuffer, framebuffer_width, framebuffer_format, pixels ? pixels[0] : 0);
+        PSB_LOG(VIDEO, "frame gozando numero %u endereco %08x largura %d formato %d pixel %08x", frame_count, (u32)(uintptr_t)framebuffer, framebuffer_width, framebuffer_format, pixels ? pixels[0] : 0);
     }
 }
 
@@ -290,7 +290,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_display(u32 nid, u32 a
 
     if (nid == 0x289d82fe) {
         display_set_count++;
-        if (display_set_count <= 20 || display_set_count % 100 == 0) PSB_LOG(GE, "display trocou a frica %u endereco %08x stride %u formato %u", display_set_count, a0, a1, a2);
+        if (display_set_count <= 20 || display_set_count % 100 == 0) PSB_LOG(VIDEO, "display trocou a frica %u endereco %08x stride %u formato %u", display_set_count, a0, a1, a2);
         framebuffer = (const void *)(uintptr_t)a0;
         last_display_vblank = current_vcount();
         auto_source_active = 0;

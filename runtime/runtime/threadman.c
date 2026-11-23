@@ -152,7 +152,7 @@ int psbridge_wait_guest_thread_end(int uid, void *timeout, int use_callbacks)
             {
                 static u32 logs;
                 if (logs++ < 32)
-                    PRINT_LOG("thread esperou a putaria uid %d retorno %d tempo %u\n",
+                    PSB_LOG(THREAD, "thread esperou a putaria uid %d retorno %d tempo %u",
                         uid, status, (u32)elapsed);
             }
             return status;
@@ -166,7 +166,7 @@ int psbridge_wait_guest_thread_end(int uid, void *timeout, int use_callbacks)
 
         if (!warned && elapsed >= 500000) {
             warned = 1;
-            PRINT_LOG("thread ainda ta esperando a putaria uid %d ee %d tempo %u\n",
+            PSB_LOG(THREAD, "thread ainda ta esperando a putaria uid %d ee %d tempo %u",
                 uid, thread->thread_id, (u32)elapsed);
         }
 
@@ -260,7 +260,7 @@ static void run_thread(void *arg)
         );
         static unsigned logs;
         if (logs++ < 32)
-            PRINT_LOG("thread %d terminou a putaria retorno %d\n", thread->uid, result);
+            PSB_LOG(THREAD, "thread %d terminou a putaria retorno %d", thread->uid, result);
         finish_guest_thread(thread->uid, result);
     }
 
@@ -732,7 +732,7 @@ void psbridge_exit_guest_thread(int status)
         if (threads[index].used > 0 && threads[index].thread_id == caller) {
             static unsigned logs;
             if (logs++ < 32)
-                PRINT_LOG("thread %d vazou da putaria resultado %d\n", threads[index].uid, status);
+                PSB_LOG(THREAD, "thread %d vazou da putaria resultado %d", threads[index].uid, status);
             finish_guest_thread(threads[index].uid, status);
             threads[index].used = 0;
             break;

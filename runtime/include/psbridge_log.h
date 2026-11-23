@@ -15,7 +15,9 @@ static inline void psbridge_print_log(const char *format, ...)
 #define PRINT_LOG(...) do { } while (0)
 #define PRINT_3D_LOG(...) psbridge_print_log(__VA_ARGS__)
 
-#define PSB_LOG_MASTER 0
+#define PSB_LOG_MASTER 1
+#define PSB_LOG_BOOT 1
+#define PSB_LOG_VIDEO 1
 #define PSB_LOG_IMPORT 0
 #define PSB_LOG_IO 0
 #define PSB_LOG_THREAD 1
@@ -24,10 +26,10 @@ static inline void psbridge_print_log(const char *format, ...)
 #define PSB_LOG_GFX 0
 #define PSB_LOG_AUDIO 0
 #define PSB_LOG_MEMORY 0
-#define PSB_LOG_VFPU 0
+#define PSB_LOG_VFPU 1
 
 #if PSB_LOG_MASTER
-#define PSB_LOG(area, format, ...) do { if (PSB_LOG_##area) PRINT_LOG(format "\n", ##__VA_ARGS__); } while (0)
+#define PSB_LOG(area, format, ...) do { if (PSB_LOG_##area) psbridge_print_log(format "\n", ##__VA_ARGS__); } while (0)
 #else
 #define PSB_LOG(area, format, ...) do { } while (0)
 #endif
