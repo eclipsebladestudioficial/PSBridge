@@ -1010,11 +1010,9 @@ static inline __attribute__((always_inline)) u32 shade_pixel_cached(
     return result | (output_alpha << 24);
 }
 
-static int triangle_indexed_texture_setup(TrianglePalette *texture)
+static int triangle_indexed_texture_layout(TrianglePalette *texture)
 {
     int buffer_width;
-    int entries;
-    int index;
 
     texture->format = ge_state.command[GE_TEXFORMAT] & 0xf;
     if (texture->format != 4 && texture->format != 5)
@@ -1033,9 +1031,16 @@ static int triangle_indexed_texture_setup(TrianglePalette *texture)
     texture->swizzled = ge_state.command[GE_TEXMODE] & 1;
     texture->clamp_x = ge_state.command[GE_TEXWRAP] & 1;
     texture->clamp_y = (ge_state.command[GE_TEXWRAP] >> 8) & 1;
-    entries = texture->format == 4 ? 16 : 256;
+    return 1;
+}
 
-    for (index = 0; index < entries; index++)
+static int triangle_indexed_texture_setup(TrianglePalette *texture)
+{
+    if (!triangle_indexed_texture_layout(texture))
+        return 0;
+
+    int entries = texture->format == 4 ? 16 : 256;
+    for (int index = 0; index < entries; index++)
         texture->colors[index] = palette_color(index);
 
     return 1;
@@ -1149,11 +1154,11 @@ static inline __attribute__((always_inline)) void triangle_target_store(
         *depth_buffer = value;
 }
 
-static int triangle_target_setup(TriangleTarget *target)
+static int triangle_target_setup(TriangleTarget *target, int format)
 {
     u32 alpha_command = ge_state.command[GE_ALPHATEST];
     target->width = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
-    if ((ge_state.command[GE_FRAMEBUF_FORMAT] & 3) != 3 ||
+    if ((ge_state.command[GE_FRAMEBUF_FORMAT] & 3) != format ||
         target->width < 64 || target->width > 2048)
         return 0;
     target->frame = ge_pointer(buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH));
@@ -1245,6 +1250,321 @@ static inline __attribute__((always_inline)) u32 blend_dxt_packed(u32 source, u3
     rb = ((rb + 0x00010001u + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
     green = (green + 1u + (green >> 8)) >> 8;
     return rb | (green << 8) | (output_alpha << 24);
+}
+
+typedef struct {
+    u32 revision;
+    u32 clut_format;
+    u32 color;
+    u32 texfunc;
+    u32 environment;
+    u32 alpha_test;
+    int blend;
+} TrianglePaletteKey;
+
+static const u32 *triangle_5551_span_colors(
+    TrianglePalette *texture, const TriangleTarget *target,
+    int shade_palette, u32 color, u32 texfunc, u32 environment)
+{
+    static struct {
+        TrianglePaletteKey key;
+        u32 colors[256];
+    } cache[4];
+    static unsigned int next;
+    TrianglePaletteKey key = {
+        .revision = palette_revision(),
+        .clut_format = ge_state.command[GE_CLUTFORMAT],
+        .color = shade_palette ? color : 0,
+        .texfunc = shade_palette ? (texfunc | 0x80000000u) : texfunc & 0x100,
+        .environment = shade_palette && (texfunc & 7) == 2 ?
+            environment & 0xffffff : 0,
+        .alpha_test = target->alpha_test ?
+            0x80000000u | ge_state.command[GE_ALPHATEST] : 0,
+        .blend = target->blend
+    };
+    u32 *colors = texture->colors;
+    int index;
+
+    if (key.revision) {
+        for (index = 0; index < 4; index++)
+            if (memcmp(&cache[index].key, &key, sizeof(key)) == 0)
+                return cache[index].colors;
+
+        index = next++ & 3;
+        cache[index].key = key;
+        colors = cache[index].colors;
+    }
+
+    for (index = 0; index < 256; index++) {
+        u32 texel = palette_color(index);
+        if (shade_palette)
+            texel = shade_pixel_cached(texel, color, texfunc & 7, texfunc & 0x100, environment);
+        else if (!(texfunc & 0x100))
+            texel |= 0xff000000u;
+        u32 alpha = texel >> 24;
+        if ((target->alpha_test && !raster_compare(target->alpha_function,
+            alpha & target->alpha_mask, target->alpha_reference)) ||
+            (target->blend && !alpha))
+            texel = 0;
+        else if (!target->blend || alpha == 255)
+            texel = 0xff000000u | pack_color_5551(texel);
+        colors[index] = texel;
+    }
+    return colors;
+}
+
+static inline __attribute__((always_inline)) u16 triangle_depth_value(float depth)
+{
+    if (depth < 0.0f)
+        depth = 0.0f;
+    if (depth > 65535.0f)
+        depth = 65535.0f;
+    return (u16)(u32)depth;
+}
+
+static inline u64 repeat_pixel_5551(u16 pixel)
+{
+    return pixel * 0x0001000100010001ULL;
+}
+
+static void fill_span_5551(u16 *span, int count, u16 pixel)
+{
+    while (count && ((uintptr_t)span & 15)) {
+        *span++ = pixel;
+        count--;
+    }
+#ifdef _EE
+    u64 repeated = repeat_pixel_5551(pixel);
+    __asm__ volatile (
+        "pcpyld %0, %0, %0" : "+r"(repeated)
+    );
+    while (count >= 8) {
+        __asm__ volatile ("sq %1, 0(%0)" :: "r"(span), "r"(repeated) : "memory");
+        span += 8;
+        count -= 8;
+    }
+#endif
+    while (count--)
+        *span++ = pixel;
+}
+
+static int raster_ranges_overlap(const void *a, size_t a_size, const void *b, size_t b_size)
+{
+    uintptr_t start_a = (uintptr_t)a;
+    uintptr_t start_b = (uintptr_t)b;
+
+    return start_a <= start_b ? start_b - start_a < a_size : start_a - start_b < b_size;
+}
+
+static void draw_indexed_span_5551(
+    u16 *frame, u16 *depth, u16 z, int count, const u8 *indices,
+    const u32 *colors, const u32 *uniform_colors, u64 uniform_pixels)
+{
+    if (uniform_colors && !(((uintptr_t)frame | (uintptr_t)depth) & 7)) {
+        const u64 repeated_depth = repeat_pixel_5551(z);
+
+        while (count >= 4) {
+            u64 previous;
+            memcpy(&previous, frame, sizeof(previous));
+            if (previous != uniform_pixels)
+                break;
+
+            u32 a = uniform_colors[indices[0]];
+            u32 b = uniform_colors[indices[1]];
+            u32 c = uniform_colors[indices[2]];
+            u32 d = uniform_colors[indices[3]];
+            u64 pixels = (u16)a | ((u64)(u16)b << 16) |
+                ((u64)(u16)c << 32) | ((u64)(u16)d << 48);
+            memcpy(frame, &pixels, sizeof(pixels));
+            if (depth) {
+                if (a & b & c & d & 0x10000) {
+                    memcpy(depth, &repeated_depth, sizeof(repeated_depth));
+                } else {
+                    if (a & 0x10000)
+                        depth[0] = z;
+                    if (b & 0x10000)
+                        depth[1] = z;
+                    if (c & 0x10000)
+                        depth[2] = z;
+                    if (d & 0x10000)
+                        depth[3] = z;
+                }
+                depth += 4;
+            }
+            frame += 4;
+            indices += 4;
+            count -= 4;
+        }
+    }
+
+    for (int i = 0; i < count; i++) {
+        u32 color = colors[indices[i]];
+        if (color) {
+            frame[i] = color >> 24 == 255 ? (u16)color :
+                pack_color_5551(blend_dxt_packed(color, unpack_color_5551(frame[i])));
+            if (depth)
+                depth[i] = z;
+        }
+    }
+}
+
+static int draw_right_triangle_5551(
+    const TriangleTarget *target, GeVertex a, GeVertex b, GeVertex c,
+    int left, int top, int right, int bottom, int textured)
+{
+    GeVertex vertices[] = {a, b, c};
+    GeVertex corner, horizontal, vertical;
+    TrianglePalette texture;
+    const u32 *colors = NULL;
+    u32 uniform_colors[256];
+    u16 *frame = (u16 *)target->frame;
+    u16 *depth = target->depth_write ? target->depth : NULL;
+    size_t frame_size = (bottom * target->width + right + 1) * sizeof(u16);
+    size_t depth_size = (bottom * target->depth_width + right + 1) * sizeof(u16);
+    int corner_index;
+    int cx, cy, dx, dy, width, height, u_offset = 0, v_offset = 0, v_step = 0;
+    int uniform = -1;
+
+    if ((target->clear & 1) ||
+        (target->blend && !target->blend_source_alpha) ||
+        (target->depth && target->depth_test && target->depth_function != 1) ||
+        a.color != b.color || b.color != c.color || a.z != b.z || b.z != c.z ||
+        (depth && (right >= target->depth_width ||
+            raster_ranges_overlap(frame, frame_size, depth, depth_size))))
+        return 0;
+
+    for (corner_index = 0; corner_index < 3; corner_index++) {
+        corner = vertices[corner_index];
+        horizontal = vertices[(corner_index + 1) % 3];
+        vertical = vertices[(corner_index + 2) % 3];
+        if (corner.x == horizontal.x && corner.y == vertical.y) {
+            GeVertex swap = horizontal;
+            horizontal = vertical;
+            vertical = swap;
+        }
+        if (corner.y == horizontal.y && corner.x == vertical.x)
+            break;
+    }
+
+    if (corner_index == 3 || !(corner.x >= -2048 && corner.x <= 2048) ||
+        !(corner.y >= -2048 && corner.y <= 2048) ||
+        !(horizontal.x >= -2048 && horizontal.x <= 2048) ||
+        !(vertical.y >= -2048 && vertical.y <= 2048))
+        return 0;
+
+    cx = (int)corner.x;
+    cy = (int)corner.y;
+    dx = (int)horizontal.x - cx;
+    dy = (int)vertical.y - cy;
+    width = dx < 0 ? -dx : dx;
+    height = dy < 0 ? -dy : dy;
+    if (corner.x != cx || corner.y != cy ||
+        horizontal.x != cx + dx || vertical.y != cy + dy ||
+        !width || !height || width > 1024 || height > 1024 ||
+        (width & (width - 1)) || (height & (height - 1)))
+        return 0;
+
+    u32 alpha = a.color >> 24;
+    u16 packed = pack_color_5551(a.color);
+    u16 z = depth ? triangle_depth_value(a.z) : 0;
+
+    if (textured) {
+        u32 texfunc = ge_state.command[GE_TEXFUNC];
+        int shade = a.color != 0xffffffffu || ((texfunc & 7) != 0 && (texfunc & 7) != 3);
+        int any_color = 0;
+
+        if (a.inv_w != 1.0f || b.inv_w != 1.0f || c.inv_w != 1.0f ||
+            !(corner.u >= 0 && corner.u <= 2048) || !(corner.v >= 0 && corner.v <= 2048) ||
+            horizontal.v != corner.v || vertical.u != corner.u ||
+            horizontal.u - corner.u != dx ||
+            (vertical.v - corner.v != dy && vertical.v - corner.v != -dy) ||
+            corner.u != (int)corner.u || corner.v != (int)corner.v ||
+            (target->blend && (!target->alpha_test ||
+                raster_compare(target->alpha_function, 0, target->alpha_reference))) ||
+            !triangle_indexed_texture_layout(&texture) || texture.format != 5 ||
+            texture.clamp_x || texture.clamp_y || texture.texture_width > texture.row_bytes ||
+            texture.texture_height > 512 || texture.texture_width > 512 ||
+            (texture.swizzled && (texture.row_bytes & 15)))
+            return 0;
+
+        u_offset = (int)corner.u - cx;
+        v_step = vertical.v - corner.v == dy ? 1 : -1;
+        v_offset = (int)corner.v - v_step * cy - (v_step < 0);
+        if (left + u_offset < 0 || top * v_step + v_offset < 0 ||
+            bottom * v_step + v_offset < 0)
+            return 0;
+
+        size_t source_size = texture.row_bytes *
+            (texture.swizzled ? (texture.texture_height + 7) & ~7 : texture.texture_height);
+        if (raster_ranges_overlap(frame, frame_size, texture.texture, source_size) ||
+            (depth && raster_ranges_overlap(depth, depth_size, texture.texture, source_size)))
+            return 0;
+
+        colors = triangle_5551_span_colors(&texture, target, shade, a.color, texfunc,
+            ge_state.command[GE_TEXENVCOLOR]);
+        for (int i = 0; i < 256; i++)
+            any_color |= colors[i] != 0;
+        if (!any_color)
+            return 1;
+    } else {
+        if (target->blend && alpha != 255 && alpha != 0)
+            return 0;
+        if (target->alpha_test && !raster_compare(target->alpha_function,
+            alpha & target->alpha_mask, target->alpha_reference))
+            return 1;
+    }
+
+    for (int y = top; y <= bottom; y++) {
+        int y_from_corner = dy > 0 ? y - cy : cy - 1 - y;
+        if (y_from_corner < 0 || y_from_corner >= height)
+            continue;
+        int span = (width * (2 * (height - y_from_corner) - 1) + height) / (2 * height);
+        int start = dx > 0 ? cx : cx - span;
+        int end = dx > 0 ? cx + span : cx;
+        if (start < left)
+            start = left;
+        if (end > right + 1)
+            end = right + 1;
+        if (start >= end)
+            continue;
+
+        u16 *out = frame + y * target->width;
+        u16 *z_out = depth ? depth + y * target->depth_width : NULL;
+        if (!colors) {
+            if (!target->blend || alpha)
+                fill_span_5551(out + start, end - start, packed);
+            if (z_out)
+                fill_span_5551(z_out + start, end - start, z);
+            continue;
+        }
+
+        int ty = (y * v_step + v_offset) & (texture.texture_height - 1);
+        if (uniform < 0 && end - start >= 8) {
+            uniform = out[(start + end) / 2];
+            u32 destination = unpack_color_5551(uniform);
+            for (int i = 0; i < 256; i++) {
+                u32 color = colors[i];
+                uniform_colors[i] = !color ? uniform : 0x10000 |
+                    (color >> 24 == 255 ? (u16)color :
+                    pack_color_5551(blend_dxt_packed(color, destination)));
+            }
+        }
+
+        while (start < end) {
+            int tx = (start + u_offset) & (texture.texture_width - 1);
+            int count = texture.texture_width - tx;
+            if (texture.swizzled && count > 16 - (tx & 15))
+                count = 16 - (tx & 15);
+            if (count > end - start)
+                count = end - start;
+            int offset = pixel_offset(tx, ty, texture.row_bytes, 1, texture.swizzled);
+            draw_indexed_span_5551(out + start, z_out ? z_out + start : NULL, z, count,
+                texture.texture + offset, colors, uniform >= 0 ? uniform_colors : NULL,
+                repeat_pixel_5551(uniform));
+            start += count;
+        }
+    }
+    return 1;
 }
 
 static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
@@ -1383,7 +1703,11 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     if (right < left || bottom < top)
         return;
 
-    fast_target = triangle_target_setup(&target);
+    if ((ge_state.command[GE_VERTEXTYPE] & (1 << 23)) &&
+        triangle_target_setup(&target, 1) &&
+        draw_right_triangle_5551(&target, a, b, c, left, top, right, bottom, textured))
+        return;
+    fast_target = triangle_target_setup(&target, 3);
     affine = a.inv_w == 1.0f && b.inv_w == 1.0f && c.inv_w == 1.0f;
     texfunc = ge_state.command[GE_TEXFUNC] & 7;
     tex_use_alpha = ge_state.command[GE_TEXFUNC] & 0x100;

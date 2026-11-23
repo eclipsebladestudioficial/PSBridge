@@ -10,6 +10,7 @@ static inline u32 ge_div255(u32 value)
 static u8 ge_clut[1024] __attribute__((aligned(4)));
 static u32 ge_clut_bytes;
 static int ge_clut_loaded;
+static u32 ge_clut_revision;
 
 static u32 unpack_dxt_color(u16 color)
 {
@@ -33,10 +34,7 @@ u32 unpack_color(u16 color, int format)
         blue = ((color >> 11) & 0x1f) * 255 / 31;
         alpha = 255;
     } else if (format == 1) {
-        red = (color & 0x1f) * 255 / 31;
-        green = ((color >> 5) & 0x1f) * 255 / 31;
-        blue = ((color >> 10) & 0x1f) * 255 / 31;
-        alpha = (color & 0x8000) ? 255 : 0;
+        return unpack_color_5551(color);
     } else {
         red = (color & 0x0f) * 17;
         green = ((color >> 4) & 0x0f) * 17;
@@ -60,11 +58,7 @@ u16 pack_color(u32 color, int format)
         return (red >> 3) | ((green >> 2) << 5) | ((blue >> 3) << 11);
 
     if (format == 1)
-        return
-            (red >> 3) |
-            ((green >> 3) << 5) |
-            ((blue >> 3) << 10) |
-            ((alpha >= 0x80) << 15);
+        return pack_color_5551(color);
 
     return
         (red >> 4) |
@@ -197,10 +191,21 @@ void load_clut(u32 argument)
     if (!source || !bytes)
         return;
 
+    if (ge_clut_loaded && bytes <= ge_clut_bytes &&
+        memcmp(ge_clut, source, bytes) == 0)
+        return;
+
     memcpy(ge_clut, source, bytes);
     if (bytes > ge_clut_bytes)
         ge_clut_bytes = bytes;
     ge_clut_loaded = 1;
+    if (++ge_clut_revision == 0)
+        ge_clut_revision++;
+}
+
+u32 palette_revision(void)
+{
+    return ge_clut_revision;
 }
 
 u32 palette_color(u32 index)

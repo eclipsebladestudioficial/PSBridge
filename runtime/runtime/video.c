@@ -351,6 +351,21 @@ const u32 *psbridge_video_direct_frame32(void)
     return (const u32 *)source;
 }
 
+const u16 *psbridge_video_frame5551(int *width)
+{
+    const void *source = framebuffer_pointer(framebuffer);
+    uintptr_t offset = (uintptr_t)source - (uintptr_t)video_memory;
+
+    if (!source || framebuffer_format != 1 ||
+        framebuffer_width < PSP_WIDTH || framebuffer_width > 2048 ||
+        offset >= VIDEO_MEMORY_SIZE ||
+        (u32)framebuffer_width * PSP_HEIGHT * sizeof(u16) > VIDEO_MEMORY_SIZE - offset)
+        return NULL;
+
+    *width = framebuffer_width;
+    return source;
+}
+
 void psbridge_video_render_frame(u16 *frame_pixels)
 {
     const void *source = framebuffer_pointer(framebuffer);

@@ -288,6 +288,25 @@ void *ge_pointer(u32 address);
 u32 relative_address(u32 value);
 u32 buffer_address(int address_command, int width_command);
 
+static inline u16 pack_color_5551(u32 color)
+{
+    return ((color >> 3) & 0x001fu) | ((color >> 6) & 0x03e0u) |
+        ((color >> 9) & 0x7c00u) | ((color >> 16) & 0x8000u);
+}
+
+static inline u32 unpack_color_5551(u16 color)
+{
+    static const u8 expanded[32] = {
+        0, 8, 16, 24, 32, 41, 49, 57, 65, 74, 82, 90, 98, 106, 115, 123,
+        131, 139, 148, 156, 164, 172, 180, 189, 197, 205, 213, 222, 230, 238, 246, 255
+    };
+
+    return (u32)expanded[color & 31] |
+        ((u32)expanded[(color >> 5) & 31] << 8) |
+        ((u32)expanded[(color >> 10) & 31] << 16) |
+        ((color & 0x8000) ? 0xff000000u : 0);
+}
+
 u32 unpack_color(u16 color, int format);
 u16 pack_color(u32 color, int format);
 u32 read_frame_pixel(const void *buffer, int index, int format);
@@ -295,6 +314,7 @@ void write_frame_pixel(void *buffer, int index, int format, u32 color);
 int compare_alpha(int function, int value, int reference);
 u32 blend_color(u32 source, u32 destination);
 void load_clut(u32 argument);
+u32 palette_revision(void);
 u32 palette_color(u32 index);
 u32 texture_pixel(int x, int y);
 u32 shade_pixel(u32 texture, u32 vertex);

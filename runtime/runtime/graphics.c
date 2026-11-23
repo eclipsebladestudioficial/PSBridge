@@ -17,12 +17,14 @@ static GSGLOBAL *gs;
 static GSTEXTURE frame_texture;
 static GSTEXTURE frame_texture32;
 static int texture32_ready;
+static int frame5551_presented;
 static u16 frame_pixels[PSP_BUFFER_WIDTH * PSP_HEIGHT]
     __attribute__((aligned(128), section(".runtime_scratch")));
 static int graphics_ready;
 static u32 frame_count;
 extern int psbridge_video_frame_modified(void);
 extern const u32 *psbridge_video_direct_frame32(void);
+extern const u16 *psbridge_video_frame5551(int *width);
 
 int psbridge_graphics_start(void)
 {
@@ -105,8 +107,25 @@ int psbridge_graphics_start(void)
 
 void psbridge_graphics_present(int submitted)
 {
+    int source_width;
+
     if (psbridge_graphics_start() < 0)
         return;
+
+    const u16 *source5551 = psbridge_video_frame5551(&source_width);
+    if (source5551 && frame5551_presented) {
+        int y;
+        for (y = 0; y < PSP_HEIGHT; y++) {
+            if (memcmp(source5551 + y * source_width,
+                frame_pixels + y * PSP_BUFFER_WIDTH, PSP_WIDTH * sizeof(u16)))
+                break;
+        }
+        if (y == PSP_HEIGHT) {
+            if (submitted)
+                gsKit_display_buffer(gs);
+            return;
+        }
+    }
 
     if (!submitted) {
         static u32 idle;
@@ -149,6 +168,7 @@ void psbridge_graphics_present(int submitted)
     );
     gsKit_queue_exec(gs);
     gsKit_queue_reset(gs->Os_Queue);
+    frame5551_presented = source5551 != NULL;
     if (submitted)
         gsKit_display_buffer(gs);
 }
