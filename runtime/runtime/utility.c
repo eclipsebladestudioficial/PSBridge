@@ -234,7 +234,7 @@ static int message_init(void *address)
     return 0;
 }
 
-int psbridge_utility(u32 nid, void *argument)
+extern inline __attribute__((always_inline)) int psbridge_utility(u32 nid, void *argument)
 {
     if (nid == 0x50c4cd57)
         return savedata_init(argument);

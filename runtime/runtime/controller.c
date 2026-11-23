@@ -206,7 +206,7 @@ int psbridge_controller_get_sampling(void *output)
     return 0;
 }
 
-int psbridge_controller_read(void *output, int count, u32 nid)
+extern inline __attribute__((always_inline)) int psbridge_controller_read(void *output, int count, u32 nid)
 {
     PspControllerData *samples = psbridge_game_pointer(output);
     int peek = nid == 0x3a622550 || nid == 0xc152080a;

@@ -208,7 +208,7 @@ int psbridge_load_firmware_module(int descriptor)
     return register_module(NULL);
 }
 
-int psbridge_change_firmware_module(int uid, u32 operation, u32 status_address)
+extern inline __attribute__((always_inline)) int psbridge_change_firmware_module(int uid, u32 operation, u32 status_address)
 {
     int interrupts = DIntr();
     int result = UNKNOWN_MODULE;

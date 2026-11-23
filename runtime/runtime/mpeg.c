@@ -57,7 +57,6 @@ typedef struct {
     u32 width;
     u32 height;
     u32 frame_ready;
-    u64 video_pts;
 } MpegContext;
 
 typedef struct {
@@ -201,7 +200,6 @@ static void reset_streams(MpegContext *context)
         if (context->streams[i].registered)
             reset_stream(&context->streams[i]);
     context->packets = 0;
-    context->video_pts = 0;
     update_ring(context);
 }
 
@@ -387,14 +385,6 @@ static u32 get_access_unit(MpegContext *context, MpegStream *stream, u32 address
             return MPEG_NO_DATA;
         }
         pts = stream->audio_pts + ((u64)stream->frames * 2048 * 90000) / 44100;
-        if (stream->frames && pts > context->video_pts) {
-            unsigned i;
-            for (i = 0; i < MPEG_STREAM_LIMIT; ++i) {
-                const MpegStream *video = &context->streams[i];
-                if (video->registered && video->type == 0 && !video->mode && !video->ended)
-                    return MPEG_NO_DATA;
-            }
-        }
     } else {
         if (!stream->timestamp.packet &&
             read_block(stream->file, &stream->timestamp, sizeof(stream->timestamp)) != sizeof(stream->timestamp)) {
@@ -467,7 +457,6 @@ static u32 decode_video(MpegContext *context, u32 au_address, u32 stride, u32 bu
         ++context->frames;
         context->width = stream->width;
         context->height = stream->height;
-        context->video_pts = ((u64)stream->timestamp.pts_high << 32) | stream->timestamp.pts_low;
         context->frame_ready = 1;
         *status = 1;
     }
@@ -480,7 +469,7 @@ static u32 decode_video(MpegContext *context, u32 au_address, u32 stride, u32 bu
     return context->result;
 }
 
-u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
+extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5)
 {
     int i;
 

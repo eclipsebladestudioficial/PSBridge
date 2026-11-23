@@ -37,61 +37,6 @@ guest_gp_ready:
     nop
     .end psbridge_start
 
-    .globl psbridge_import
-    .ent psbridge_import
-
-
-psbridge_import:
-    addiu $sp, $sp, -64
-    sd $ra, 56($sp)
-    sd $26, 48($sp)
-    sd $27, 40($sp)
-    sd $gp, 32($sp)
-    sw $25, 24($sp)
-
-    or $11, $ra, $0
-    or $10, $9, $0
-    or $9, $8, $0
-    or $8, $7, $0
-    or $7, $6, $0
-    or $6, $5, $0
-    or $5, $4, $0
-    or $4, $25, $0
-
-    lui $gp, %hi(_gp)
-    addiu $gp, $gp, %lo(_gp)
-    jal psbridge_dispatch
-    nop
-
-    dsrl32 $3, $2, 0
-    sra $2, $2, 0
-    sra $3, $3, 0
-
-    lw $8, 24($sp)
-    lui $9, 0xdba6
-    lw $10, 0($8)
-    ori $9, $9, 0xc4c4
-    bne $10, $9, import_return
-    lui $9, 0x1ceb
-    lw $10, 4($8)
-    ori $9, $9, 0xc208
-    beq $10, $9, import_return_float
-    nop
-import_return:
-    ld $gp, 32($sp)
-    ld $27, 40($sp)
-    ld $26, 48($sp)
-    ld $ra, 56($sp)
-    addiu $sp, $sp, 64
-    jr $ra
-    nop
-
-import_return_float:
-    b import_return
-    mtc1 $2, $f0
-
-    .end psbridge_import
-
     .globl psbridge_resolve_guest
     .ent psbridge_resolve_guest
 psbridge_resolve_guest:
@@ -481,3 +426,16 @@ callback_gp_ready:
     jr $ra
     nop
     .end psbridge_call_callback
+
+    .globl psbridge_import_return
+    .ent psbridge_import_return
+psbridge_import_return:
+    sra $2, $2, 0
+    sra $3, $3, 0
+    ld $gp, 32($sp)
+    ld $27, 40($sp)
+    ld $26, 48($sp)
+    ld $ra, 56($sp)
+    jr $ra
+    addiu $sp, $sp, 64
+    .end psbridge_import_return

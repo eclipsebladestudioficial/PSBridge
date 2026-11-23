@@ -583,7 +583,8 @@ def recompile(input_path, output_path):
         ])
     import_keys = {(library_id(item["library"]), item["nid"]) for item in import_map.values()}
     export_keys = {key for library in libraries for key in library["exports"] if key in import_keys}
-    linked_imports = link_imports(lines, imports, export_keys)
+    adapters = []
+    linked_imports = link_imports(lines, imports, export_keys, adapters)
 
     binary_path = output_path.with_suffix(".bin")
     map_path = output_path.with_suffix(".map")
@@ -601,6 +602,7 @@ def recompile(input_path, output_path):
     add_info(lines, image_base, memory_size, file_size, module["gp"])
 
     output_path.write_text("\n".join(lines) + "\n")
+    output_path.with_suffix(".imports.inc").write_text("\n".join(adapters) + "\n")
     write_map(map_path, map_addresses, label)
 
     print(f"destinos externosa deveras leviano sem código {len(unsupported_targets)}")

@@ -11,13 +11,6 @@ typedef struct {
     u32 gp;
 } GuestInfo;
 
-typedef struct {
-    u32 nid;
-    u32 library;
-    u32 stub;
-    const void *wrapper;
-} PspImport;
-
 extern const GuestInfo guest_info;
 extern const u32 psp_import_count;
 

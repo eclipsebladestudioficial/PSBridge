@@ -187,7 +187,7 @@ static int atrac_new(u32 address, u32 size)
     return -1;
 }
 
-static u64 atrac_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
+static inline __attribute__((always_inline)) u64 atrac_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
 {
     AtracContext *id;
     u32 *consumed;
@@ -421,7 +421,7 @@ static u64 audio2_call(u32 nid, u32 a0)
     return (u32)-1;
 }
 
-static u64 audio_channel_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
+static inline __attribute__((always_inline)) u64 audio_channel_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
 {
     PspAudioChannel *channel;
     int id;
@@ -533,7 +533,7 @@ static u64 sas_mix(u32 address)
     return 0;
 }
 
-static u64 sas_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
+static inline __attribute__((always_inline)) u64 sas_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
 {
     if (nid == 0x42778a9f) {
         if ((a0 & 0x3f) || !audio_pointer(a0, sizeof(u32)) ||
@@ -588,7 +588,7 @@ static u64 sas_call(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
     return 0;
 }
 
-u64 psbridge_audio(u32 library, u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
+extern inline __attribute__((always_inline)) u64 psbridge_audio(u32 library, u32 nid, u32 a0, u32 a1, u32 a2, u32 a3, u32 a4)
 {
     u64 result;
 

@@ -25,7 +25,7 @@ u32 psbridge_ge_ready_sequence(void)
     return ge_ready_sequence;
 }
 
-u64 psbridge_ge(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
+extern inline __attribute__((always_inline)) u64 psbridge_ge(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
 {
     GeList *list;
     int index;

@@ -92,7 +92,7 @@ void psbridge_vblank_interrupts(void)
     psbridge_resume_intr(1);
 }
 
-u32 psbridge_subinterrupt(u32 nid, u32 interrupt, u32 slot, u32 entry, u32 argument)
+extern inline __attribute__((always_inline)) u32 psbridge_subinterrupt(u32 nid, u32 interrupt, u32 slot, u32 entry, u32 argument)
 {
     if (interrupt != VBLANK_INTERRUPT)
         return 0x80020068u;
@@ -274,7 +274,7 @@ void psbridge_video_log_frame(u32 frame_count)
     }
 }
 
-u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
+extern inline __attribute__((always_inline)) u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
 {
     if (nid == 0xdba6c4c4) {
         float rate = 59.9400599f;

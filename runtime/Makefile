@@ -8,6 +8,8 @@ API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.
 VFPU_OBJS = $(RUNTIME_BUILD)/runtime/vfpu.o $(addprefix $(RUNTIME_BUILD)/runtime/vfpu/,state.o memory.o)
 GE_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/ge/,list.o vertex.o texture.o raster.o hardware.o)
 RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS) $(GE_OBJS)
+IMPORT_OBJS = $(RUNTIME_BUILD)/core/imports.o \
+	$(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o video.o mpeg.o module.o utility.o)
 
 EE_BIN = $(BUILD_DIR)/PSBridge-debug.elf
 STRIPPED_BIN = $(BUILD_DIR)/PSBridge-stripped.elf
@@ -17,6 +19,7 @@ EE_INCS += -I$(CURDIR)/include -I$(GSKIT)/include -I$(PS2SDK)/ports/include
 EE_LINKFILE = $(CURDIR)/linker/guest.ld
 EE_ASFLAGS += -I$(abspath ..)
 EE_CFLAGS += -MMD -MP
+EE_LDFLAGS += -flto
 
 .PHONY: all clean
 
@@ -30,11 +33,16 @@ $(STRIPPED_BIN): $(EE_BIN)
 	cp $< $@
 	$(EE_STRIP) --strip-all $@
 
-$(BUILD_DIR)/game.s: $(GAME_ELF) $(wildcard $(dir $(GAME_ELF)).source.json) $(wildcard ../tools/*.py)
+$(BUILD_DIR)/game.s $(BUILD_DIR)/game.imports.inc &: $(GAME_ELF) $(wildcard $(dir $(GAME_ELF)).source.json) $(wildcard ../tools/*.py)
 	cd .. && "$(PYTHON)" tools/recompile.py "$(abspath $(GAME_ELF))" build/game.s
 
-$(BUILD_DIR)/game.o: $(BUILD_DIR)/game.s
+$(BUILD_DIR)/game.o: $(BUILD_DIR)/game.s core/import_adapter.inc
 	cd .. && $(EE_AS) $(EE_ASFLAGS) -call_nonpic -msingle-float build/game.s -o build/game.o
+
+$(IMPORT_OBJS): EE_CFLAGS += -flto
+$(IMPORT_OBJS): Makefile
+$(RUNTIME_BUILD)/core/imports.o: $(BUILD_DIR)/game.imports.inc
+$(RUNTIME_BUILD)/core/imports.o: EE_INCS += -I$(BUILD_DIR)
 
 $(RUNTIME_BUILD)/main.o: main.c
 	$(DIR_GUARD)
@@ -66,6 +74,7 @@ $(RUNTIME_BUILD)/runtime/ge/%.o: runtime/ge/%.c
 
 clean:
 	rm -f $(EE_BIN) $(STRIPPED_BIN) $(BUILD_DIR)/psbridge.elf $(RUNTIME_OBJS) $(RUNTIME_BUILD)/runtime/vfpu/*.o $(RUNTIME_OBJS:.o=.d) $(BUILD_DIR)/game.o $(BUILD_DIR)/game.s $(BUILD_DIR)/game.bin $(BUILD_DIR)/game.map
+	rm -f $(BUILD_DIR)/game.imports.inc
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal

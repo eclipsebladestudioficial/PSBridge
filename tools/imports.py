@@ -25,7 +25,7 @@ def import_binding(library, nid):
     return f"psp_binding_{library:08x}_{nid:08x}"
 
 
-def link_imports(lines, imports, exports=()):
+def link_imports(lines, imports, exports, adapters):
     variables = [item for item in imports if item ["kind"] == "variable"]
 
     if variables:
@@ -42,21 +42,19 @@ def link_imports(lines, imports, exports=()):
 
     functions = list(functions.values())
 
-    libraries = {
-        name: f"psp_import_library_{index}"
-        for index, name in enumerate(sorted({item["library"] for item in functions}))
-    }
-
     lines.extend([
         '.section .text.psp_imports,"ax",@progbits',
         ".balign 4",
-        ".extern psbridge_import",
+        '.include "runtime/core/import_adapter.inc"',
     ])
 
-    for index, item in enumerate(functions):
+    for item in functions:
         symbol = import_symbol(item)
-        descriptor = f"psp_import_{index}"
-        key = (library_id(item["library"]), item["nid"])
+        library, nid = library_id(item["library"]), item["nid"]
+        key = library, nid
+        target = f"psbridge_import_{library:08x}_{nid:08x}"
+        float_result = item["library"] == "sceDisplay" and nid == 0xdba6c4c4
+        adapters.append(f"PSBRIDGE_IMPORT({target}, 0x{library:08x}u, 0x{nid:08x}u)")
 
         lines.extend([
             f".globl {symbol}",
@@ -75,9 +73,7 @@ def link_imports(lines, imports, exports=()):
                 f"{symbol}_hle:",
             ])
         lines.extend([
-            f"    lui $25, %hi({descriptor})",
-            "    j psbridge_import",
-            f"    addiu $25, $25, %lo({descriptor})",
+            f"    psbridge_import_call {target}, {int(float_result)}",
             f".size {symbol}, . - {symbol}",
         ])
 
@@ -85,31 +81,9 @@ def link_imports(lines, imports, exports=()):
         '.section .rodata.psp_imports,"a",@progbits',
         ".balign 4",
         ".globl psp_import_count",
-        ".globl psp_import_table",
-        ".globl psp_import_table_end",
         "psp_import_count:",
         f".word {len(functions)}",
-        "psp_import_table:",
     ])
-
-    for index, item in enumerate(functions):
-        lines.extend([
-            f"psp_import_{index}:",
-            f".word 0x{item['nid']:08x}",
-            f".word 0x{library_id(item ['library']):08x}",
-            f".word 0x{item['stub']:08x}",
-            f".word {import_symbol(item)}",
-        ])
-
-    lines.append("psp_import_table_end:")
-
-    for library, symbol in libraries.items():
-        escaped = library.replace("\\", "\\\\").replace('"', '\\"')
-
-        lines.extend([
-            f"{symbol}:",
-            f'.asciz "{escaped}"',
-        ])
 
     return len(functions)
 
