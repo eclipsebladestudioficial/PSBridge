@@ -761,6 +761,17 @@ static void draw_sprite(GeVertex first, GeVertex second)
     int right = (int)(first.x > second.x ? first.x : second.x);
     int bottom = (int)(first.y > second.y ? first.y : second.y);
 
+    int draw_left = left;
+    int draw_top = top;
+    int draw_right = right;
+    int draw_bottom = bottom;
+    void *frame;
+    int stride;
+    if (fast_sprite_target(&draw_left, &draw_top, &draw_right, &draw_bottom, &frame, &stride) &&
+        ge_hardware_sprite(first, second, draw_left, draw_top, draw_right, draw_bottom))
+        return;
+
+    ge_hardware_cpu_write();
     clear_depth_sprite(second, left, top, right, bottom);
     int u_start;
     int v_start;
@@ -1703,6 +1714,10 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     if (right < left || bottom < top)
         return;
 
+    if (ge_hardware_triangle(a, b, c, left, top, right + 1, bottom + 1))
+        return;
+    ge_hardware_cpu_write();
+
     if ((ge_state.command[GE_VERTEXTYPE] & (1 << 23)) &&
         triangle_target_setup(&target, 1) &&
         draw_right_triangle_5551(&target, a, b, c, left, top, right, bottom, textured))
@@ -2265,6 +2280,9 @@ void draw_primitive(u32 argument)
     if (count <= 0)
         return;
 
+    ge_hardware_read(ge_pointer(ge_state.vertex_address));
+    if (index_type)
+        ge_hardware_read(ge_pointer(ge_state.index_address));
     layout = vertex_layout(type);
     if (primitive == 6) {
         for (index = 0; index + 1 < count; index += 2)

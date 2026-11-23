@@ -350,6 +350,12 @@ static inline int pixel_offset(int x, int y, int row_bytes, int bytes, int swizz
 VertexLayout vertex_layout(u32 type);
 GeVertex read_vertex(int number, u32 type, VertexLayout layout);
 void draw_primitive(u32 argument);
+int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int right, int bottom);
+int ge_hardware_triangle(GeVertex a, GeVertex b, GeVertex c, int left, int top, int right, int bottom);
+void ge_hardware_flush(void);
+void ge_hardware_read(const void *source);
+void ge_hardware_cpu_write(void);
+void ge_hardware_texture_dirty(void);
 
 GeList *find_list(int id);
 void execute_list(GeList *list);

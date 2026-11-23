@@ -167,15 +167,6 @@ static void wait_vblank(u32 cycles, int use_callbacks)
     }
 }
 
-static u16 gs_color(u8 red, u8 green, u8 blue, u8 alpha)
-{
-    return
-        (red >> 3) |
-        ((green >> 3) << 5) |
-        ((blue >> 3) << 10) |
-        ((alpha >= 0x80) << 15);
-}
-
 static const void *framebuffer_pointer(const void *address)
 {
     u32 value = (u32)(uintptr_t)address;
@@ -196,44 +187,6 @@ static const void *framebuffer_pointer(const void *address)
     return psbridge_game_pointer((const void *)(uintptr_t)value);
 }
 
-static u16 convert_pixel(const void *source, u32 index, int format)
-{
-    u16 pixel16;
-    u32 pixel32;
-    u8 red;
-    u8 green;
-    u8 blue;
-    u8 alpha;
-
-    if (format == 3) {
-        pixel32 = ((const u32 *)source)[index];
-        return gs_color(
-            pixel32,
-            pixel32 >> 8,
-            pixel32 >> 16,
-            pixel32 >> 24
-        );
-    }
-
-    pixel16 = ((const u16 *)source)[index];
-
-    if (format == 0) {
-        red = (pixel16 & 0x1f) << 3;
-        green = ((pixel16 >> 5) & 0x3f) << 2;
-        blue = ((pixel16 >> 11) & 0x1f) << 3;
-        return gs_color(red, green, blue, 0xff);
-    }
-
-    if (format == 1)
-        return pixel16;
-
-    red = (pixel16 & 0xf) * 17;
-    green = ((pixel16 >> 4) & 0xf) * 17;
-    blue = ((pixel16 >> 8) & 0xf) * 17;
-    alpha = ((pixel16 >> 12) & 0xf) * 17;
-    return gs_color(red, green, blue, alpha);
-}
-
 static u32 framebuffer_hash(const void *ptr, int width)
 {
     const u32 *source = (const u32 *)ptr;
@@ -252,50 +205,7 @@ static u32 framebuffer_hash(const void *ptr, int width)
     return hash;
 }
 
-int psbridge_video_frame_modified(void)
-{
-    static const void *last_pointer;
-    static u32 last_hash;
-    static u32 last_sequence;
-    static int last_width;
-    static int ready;
-    const void *source = framebuffer_pointer(framebuffer);
-    const u8 *vram = (const u8 *)psbridge_video_memory();
-    uintptr_t offset;
-    u32 hash;
-    u32 sequence;
-    int changed;
-
-    if (!source || framebuffer_format != 3 ||
-        framebuffer_width < PSP_WIDTH || framebuffer_width > 2048) {
-        ready = 0;
-        return 1;
-    }
-    if ((uintptr_t)source < (uintptr_t)vram) {
-        ready = 0;
-        return 1;
-    }
-    offset = (uintptr_t)source - (uintptr_t)vram;
-    if (offset > VIDEO_MEMORY_SIZE ||
-        (u32)framebuffer_width * PSP_HEIGHT * 4u > VIDEO_MEMORY_SIZE - offset) {
-        ready = 0;
-        return 1;
-    }
-
-    hash = framebuffer_hash(source, framebuffer_width);
-    sequence = psbridge_ge_ready_sequence();
-    changed = !ready || last_pointer != source ||
-        last_hash != hash || last_sequence != sequence ||
-        last_width != framebuffer_width;
-    ready = 1;
-    last_pointer = source;
-    last_hash = hash;
-    last_sequence = sequence;
-    last_width = framebuffer_width;
-    return changed;
-}
-
-const u32 *psbridge_video_direct_frame32(void)
+const void *psbridge_video_frame(int *stride, int *format)
 {
     const void *source = framebuffer_pointer(framebuffer);
     int width = framebuffer_width;
@@ -308,11 +218,18 @@ const u32 *psbridge_video_direct_frame32(void)
     u32 candidate_hash = 0;
     u32 current_hash = 0;
 
-    if (!source)
+    *format = framebuffer_format;
+    *stride = 0;
+    if (!source || (unsigned)framebuffer_format > 3)
         return NULL;
 
     if (width < PSP_WIDTH || width > 2048)
         width = PSP_BUFFER_WIDTH;
+
+    unsigned bytes = framebuffer_format == 3 ? 4 : 2;
+    if (visible_offset < VIDEO_MEMORY_SIZE &&
+        ((PSP_HEIGHT - 1) * width + (width == PSP_BUFFER_WIDTH ? width : PSP_WIDTH)) * bytes > VIDEO_MEMORY_SIZE - visible_offset)
+        return NULL;
 
     if (framebuffer_format == 3 && visible_offset <= 0x200000u - 0x88000u) {
         current_hash = framebuffer_hash(source, width);
@@ -335,7 +252,7 @@ const u32 *psbridge_video_direct_frame32(void)
             display_vblank - last_display_vblank >= 12u) {
             auto_source_active = 1;
             auto_source_offset = ge_offset;
-                }
+        }
         if (auto_source_active && auto_source_offset == ge_offset &&
             display_vblank - last_display_vblank >= 12u) {
             source = vram + auto_source_offset;
@@ -345,104 +262,8 @@ const u32 *psbridge_video_direct_frame32(void)
         ge_frame_seq_seen = ge_sequence;
     }
 
-    if (framebuffer_format != 3 || width != PSP_BUFFER_WIDTH ||
-        ((uintptr_t)source & 15u))
-        return NULL;
-    return (const u32 *)source;
-}
-
-const u16 *psbridge_video_frame5551(int *width)
-{
-    const void *source = framebuffer_pointer(framebuffer);
-    uintptr_t offset = (uintptr_t)source - (uintptr_t)video_memory;
-
-    if (!source || framebuffer_format != 1 ||
-        framebuffer_width < PSP_WIDTH || framebuffer_width > 2048 ||
-        offset >= VIDEO_MEMORY_SIZE ||
-        (u32)framebuffer_width * PSP_HEIGHT * sizeof(u16) > VIDEO_MEMORY_SIZE - offset)
-        return NULL;
-
-    *width = framebuffer_width;
+    *stride = width;
     return source;
-}
-
-void psbridge_video_render_frame(u16 *frame_pixels)
-{
-    const void *source = framebuffer_pointer(framebuffer);
-    int width = framebuffer_width;
-    u32 ge_sequence = psbridge_ge_ready_sequence();
-    u32 ge_offset = psbridge_ge_ready_buffer();
-    u32 display_vblank = current_vcount();
-    u8 *vram = (u8 *)psbridge_video_memory();
-    u32 visible_offset = (u32)((uintptr_t)source - (uintptr_t)vram);
-    const void *candidate = NULL;
-    u32 candidate_hash = 0;
-    u32 current_hash = 0;
-    int x;
-    int y;
-
-    memset(frame_pixels, 0, PSP_BUFFER_WIDTH * PSP_HEIGHT * sizeof(u16));
-
-    if (!source)
-        return;
-
-    if (width < PSP_WIDTH || width > 2048)
-        width = PSP_BUFFER_WIDTH;
-
-    if (framebuffer_format == 3 && visible_offset <= 0x200000u - 0x88000u) {
-        current_hash = framebuffer_hash(source, width);
-        if (ge_offset <= 0x200000u - 0x88000u && ge_offset != visible_offset && ge_sequence) {
-            int known = 0;
-            int i;
-            for (i = 0; i < known_video_count; i++) {
-                if (known_video_buffers[i] == ge_offset) {
-                    known = 1;
-                    break;
-                }
-            }
-            if (known) {
-                candidate = vram + ge_offset;
-                candidate_hash = framebuffer_hash(candidate, PSP_BUFFER_WIDTH);
-            }
-        }
-        if (candidate && !auto_source_active && ge_sequence != ge_frame_seq_seen &&
-            current_hash == frame_saved_hash && candidate_hash != current_hash &&
-            display_vblank - last_display_vblank >= 12u) {
-            auto_source_active = 1;
-            auto_source_offset = ge_offset;
-                }
-        if (auto_source_active && auto_source_offset == ge_offset &&
-            display_vblank - last_display_vblank >= 12u) {
-            source = vram + auto_source_offset;
-            width = PSP_BUFFER_WIDTH;
-        }
-        frame_saved_hash = current_hash;
-        ge_frame_seq_seen = ge_sequence;
-    }
-
-    if (framebuffer_format == 1) {
-        for (y = 0; y < PSP_HEIGHT; y++) {
-            memcpy(
-                frame_pixels + y * PSP_BUFFER_WIDTH,
-                (const u16 *)source + y * width,
-                PSP_WIDTH * sizeof(u16)
-            );
-        }
-
-        return;
-    }
-
-    for (y = 0; y < PSP_HEIGHT; y++) {
-        for (x = 0; x < PSP_WIDTH; x++) {
-            u16 pixel = convert_pixel(
-                source,
-                y * width + x,
-                framebuffer_format
-            );
-
-            frame_pixels[y * PSP_BUFFER_WIDTH + x] = pixel;
-        }
-    }
 }
 
 void psbridge_video_log_frame(u32 frame_count)
@@ -485,7 +306,7 @@ u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
         framebuffer_width = a1;
         framebuffer_format = a2;
         (void)a3;
-        psbridge_graphics_present(1);
+        psbridge_graphics_present();
         return 0;
     }
 
@@ -503,7 +324,7 @@ u64 psbridge_display(u32 nid, u32 a0, u32 a1, u32 a2, u32 a3)
     ) {
         u32 cycles = nid == 0x77ed8b3a ? a0 : 1;
 
-        psbridge_graphics_present(0);
+        psbridge_graphics_present();
         wait_vblank(cycles, nid != 0x984c27e7);
         return 0;
     }

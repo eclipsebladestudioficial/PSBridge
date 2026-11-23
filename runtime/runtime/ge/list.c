@@ -140,6 +140,7 @@ GeList *find_list(int id)
 void execute_list(GeList *list)
 {
     int commands = 0;
+    ge_hardware_texture_dirty();
     ge_dxt_new_list();
 
     while (!list->done && commands++ < GE_COMMAND_LIMIT) {
@@ -163,6 +164,7 @@ void execute_list(GeList *list)
             break;
         }
 
+        ge_hardware_read(instruction);
         word = *instruction;
         command = word >> 24;
         argument = word & 0x00ffffff;
@@ -202,13 +204,17 @@ void execute_list(GeList *list)
             list->draws++;
             draw_primitive(argument);
         } else if (command == GE_TRANSFERSTART) {
+            ge_hardware_texture_dirty();
+            ge_hardware_cpu_write();
             transfer_pixels();
             ge_dxt_dirty();
         }
-        else if (command == GE_LOADCLUT)
+        else if (command == GE_LOADCLUT) {
             load_clut(argument);
-        else if (command == 0xcb)
+        } else if (command == 0xcb) {
+            ge_hardware_texture_dirty();
             ge_dxt_dirty();
+        }
         else if (command == GE_JUMP)
             list->pc = relative_address(argument & 0x00fffffc);
         else if (command == GE_CALL && list->stack_size < GE_STACK_LIMIT) {
@@ -227,6 +233,7 @@ void execute_list(GeList *list)
             list->finish_id = argument;
             list->pending_finish = 1;
         } else if (command == GE_END) {
+            ge_hardware_flush();
             list->done = 1;
             if (list->draws) {
                 u32 target = buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH);
@@ -247,6 +254,7 @@ void execute_list(GeList *list)
             }
         }
     }
+    ge_hardware_flush();
     if (commands >= GE_COMMAND_LIMIT) {
         list->done = 1;
     }

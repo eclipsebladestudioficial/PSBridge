@@ -6,7 +6,7 @@ MAIN_OBJ = $(RUNTIME_BUILD)/main.o
 CORE_OBJS = $(addprefix $(RUNTIME_BUILD)/core/,imports.o guest.o vfpu_entry.o)
 API_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/,audio.o controller.o ge.o ge3d.o graphics.o video.o io.o pgd.o memory.o module.o threadman.o lwmutex.o sync.o utility.o)
 VFPU_OBJS = $(RUNTIME_BUILD)/runtime/vfpu.o $(addprefix $(RUNTIME_BUILD)/runtime/vfpu/,state.o memory.o)
-GE_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/ge/,list.o vertex.o texture.o raster.o)
+GE_OBJS = $(addprefix $(RUNTIME_BUILD)/runtime/ge/,list.o vertex.o texture.o raster.o hardware.o)
 RUNTIME_OBJS = $(MAIN_OBJ) $(CORE_OBJS) $(API_OBJS) $(VFPU_OBJS) $(GE_OBJS)
 
 EE_BIN = $(BUILD_DIR)/PSBridge-debug.elf

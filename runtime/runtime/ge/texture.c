@@ -191,6 +191,7 @@ void load_clut(u32 argument)
     if (!source || !bytes)
         return;
 
+    ge_hardware_read(source);
     if (ge_clut_loaded && bytes <= ge_clut_bytes &&
         memcmp(ge_clut, source, bytes) == 0)
         return;
