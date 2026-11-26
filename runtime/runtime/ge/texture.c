@@ -42,8 +42,6 @@ u32 unpack_color(u16 color, int format)
         alpha = ((color >> 12) & 0x0f) * 17;
     }
 
-    
-
     return red | (green << 8) | (blue << 16) | (alpha << 24);
 }
 
@@ -110,17 +108,28 @@ static int blend_factor(int type, u32 source, u32 destination, u32 fixed, int sh
     int other = (source_factor ? destination : source) >> shift & 0xff;
 
     switch (type) {
-    case 0: return other;
-    case 1: return 255 - other;
-    case 2: return src_alpha;
-    case 3: return 255 - src_alpha;
-    case 4: return dst_alpha;
-    case 5: return 255 - dst_alpha;
-    case 6: return src_alpha * 2;
-    case 7: return 255 - src_alpha * 2;
-    case 8: return dst_alpha * 2;
-    case 9: return 255 - dst_alpha * 2;
-    default: return (fixed >> shift) & 0xff;
+    case 0:
+        return other;
+    case 1:
+        return 255 - other;
+    case 2:
+        return src_alpha;
+    case 3:
+        return 255 - src_alpha;
+    case 4:
+        return dst_alpha;
+    case 5:
+        return 255 - dst_alpha;
+    case 6:
+        return src_alpha * 2;
+    case 7:
+        return 255 - src_alpha * 2;
+    case 8:
+        return dst_alpha * 2;
+    case 9:
+        return 255 - dst_alpha * 2;
+    default:
+        return (fixed >> shift) & 0xff;
     }
 }
 
@@ -145,6 +154,7 @@ u32 blend_color(u32 source, u32 destination)
             return source;
         if (alpha == 0)
             return destination;
+
         u32 inverse = 255 - alpha;
         u32 red = ge_div255((source & 0xff) * alpha + (destination & 0xff) * inverse);
         u32 green = ge_div255(((source >> 8) & 0xff) * alpha + ((destination >> 8) & 0xff) * inverse);
@@ -161,13 +171,26 @@ u32 blend_color(u32 source, u32 destination)
         int value;
 
         switch (operation) {
-        case 1: value = (src * a - dst * b) / 255; break;
-        case 2: value = (dst * b - src * a) / 255; break;
-        case 3: value = src < dst ? src : dst; break;
-        case 4: value = src > dst ? src : dst; break;
-        case 5: value = src > dst ? src - dst : dst - src; break;
-        default: value = (src * a + dst * b) / 255; break;
+        case 1:
+            value = (src * a - dst * b) / 255;
+            break;
+        case 2:
+            value = (dst * b - src * a) / 255;
+            break;
+        case 3:
+            value = src < dst ? src : dst;
+            break;
+        case 4:
+            value = src > dst ? src : dst;
+            break;
+        case 5:
+            value = src > dst ? src - dst : dst - src;
+            break;
+        default:
+            value = (src * a + dst * b) / 255;
+            break;
         }
+
         if (value < 0)
             value = 0;
         if (value > 255)
@@ -222,6 +245,7 @@ u32 palette_color(u32 index)
     if (ge_clut_loaded) {
         if ((index + 1u) * (format == 3 ? 4u : 2u) > ge_clut_bytes)
             return 0;
+
         palette = ge_clut;
     } else {
         address =
@@ -246,6 +270,7 @@ int ge_dxt_setup(GeDxtSampler *sampler)
     sampler->format = ge_state.command[GE_TEXFORMAT] & 0xf;
     if (sampler->format != 8 && sampler->format != 9)
         return 0;
+
     sampler->width = 1 << (ge_state.command[GE_TEXSIZE0] & 0xf);
     sampler->height = 1 << ((ge_state.command[GE_TEXSIZE0] >> 8) & 0xf);
     buffer_width = texture_buffer_width(sampler->format);
@@ -315,6 +340,7 @@ static u32 dxt_source_checksum(const u8 *source, int size)
             value *= 16777619u;
         }
     }
+
     return value;
 }
 
@@ -348,11 +374,13 @@ static void dxt_prepare_expanded(GeDxtSampler *sampler)
             chosen = i;
             break;
         }
+
         if (entry->last_used < oldest) {
             oldest = entry->last_used;
             chosen = i;
         }
     }
+
     entry = &dxt_ready_entries[chosen];
     if (entry->texture != sampler->texture || entry->width != sampler->width ||
         entry->height != sampler->height || entry->blocks_w != sampler->blocks_w ||
@@ -368,6 +396,7 @@ static void dxt_prepare_expanded(GeDxtSampler *sampler)
         entry->stable_epochs = 0;
         entry->expanded = 0;
     }
+
     if (entry->last_epoch != dxt_epoch) {
         size = count * sampler->bytes;
         checksum = dxt_source_checksum(sampler->texture, size);
@@ -378,10 +407,12 @@ static void dxt_prepare_expanded(GeDxtSampler *sampler)
         } else if (entry->stable_epochs < 2) {
             entry->stable_epochs++;
         }
+
         if (!entry->expanded && entry->stable_epochs >= 2) {
-                sampler->block = NULL;
+            sampler->block = NULL;
             entry->opaque = 1;
             memset(sampler->cache, 0, sizeof(sampler->cache));
+
             for (ty = 0; ty < sampler->height; ty += 4) {
                 for (tx = 0; tx < sampler->width; tx += 4) {
                     for (dy = 0; dy < 4; dy++) {
@@ -396,10 +427,13 @@ static void dxt_prepare_expanded(GeDxtSampler *sampler)
                     }
                 }
             }
+
             entry->expanded = 1;
         }
+
         entry->last_epoch = dxt_epoch;
     }
+
     entry->last_used = ++dxt_uses;
     if (entry->expanded) {
         sampler->ready_pixels = dxt_ready_rgba[chosen];
@@ -423,8 +457,6 @@ u32 texture_pixel(int x, int y)
 
     if (!texture || !width || !height)
         return 0;
-
-    
 
     if (clamp_x) {
         if (x < 0)
@@ -496,22 +528,33 @@ u32 texture_pixel(int x, int y)
         u16 color1 = colors[6] | ((u16)colors[7] << 8);
         u32 c0 = unpack_dxt_color(color0);
         u32 c1 = unpack_dxt_color(color1);
-        u32 indices = (u32)colors[0] | ((u32)colors[1] << 8) | ((u32)colors[2] << 16) | ((u32)colors[3] << 24);
+        u32 indices = (u32)colors[0] |
+            ((u32)colors[1] << 8) |
+            ((u32)colors[2] << 16) |
+            ((u32)colors[3] << 24);
         int pos = ((y & 3) << 2) | (x & 3);
         int which = (indices >> (pos * 2)) & 3;
         u32 rgb;
         u32 a = 255;
+
         if (which == 0)
             rgb = c0;
         else if (which == 1)
             rgb = c1;
         else if (which == 2)
-            rgb = (((c0 & 0xff) * 2 + (c1 & 0xff)) / 3) | (((((c0 >> 8) & 0xff) * 2 + ((c1 >> 8) & 0xff)) / 3) << 8) | (((((c0 >> 16) & 0xff) * 2 + ((c1 >> 16) & 0xff)) / 3) << 16);
+            rgb = (((c0 & 0xff) * 2 + (c1 & 0xff)) / 3) |
+                (((((c0 >> 8) & 0xff) * 2 + ((c1 >> 8) & 0xff)) / 3) << 8) |
+                (((((c0 >> 16) & 0xff) * 2 + ((c1 >> 16) & 0xff)) / 3) << 16);
         else
-            rgb = (((c0 & 0xff) + (c1 & 0xff) * 2) / 3) | (((((c0 >> 8) & 0xff) + ((c1 >> 8) & 0xff) * 2) / 3) << 8) | (((((c0 >> 16) & 0xff) + ((c1 >> 16) & 0xff) * 2) / 3) << 16);
+            rgb = (((c0 & 0xff) + (c1 & 0xff) * 2) / 3) |
+                (((((c0 >> 8) & 0xff) + ((c1 >> 8) & 0xff) * 2) / 3) << 8) |
+                (((((c0 >> 16) & 0xff) + ((c1 >> 16) & 0xff) * 2) / 3) << 16);
+
         if (format == 8 && color0 <= color1) {
             if (which == 2)
-                rgb = (((c0 & 0xff) + (c1 & 0xff)) >> 1) | (((((c0 >> 8) & 0xff) + ((c1 >> 8) & 0xff)) >> 1) << 8) | (((((c0 >> 16) & 0xff) + ((c1 >> 16) & 0xff)) >> 1) << 16);
+                rgb = (((c0 & 0xff) + (c1 & 0xff)) >> 1) |
+                    (((((c0 >> 8) & 0xff) + ((c1 >> 8) & 0xff)) >> 1) << 8) |
+                    (((((c0 >> 16) & 0xff) + ((c1 >> 16) & 0xff)) >> 1) << 16);
             if (which == 3)
                 a = 0;
         } else if (format == 9) {
@@ -519,10 +562,13 @@ u32 texture_pixel(int x, int y)
         } else if (format == 10) {
             u8 alphas[8];
             u32 alpha_index = (u32)(block[8 + pos * 3 / 8] >> ((pos * 3) & 7));
+
             if (((pos * 3) & 7) > 5)
                 alpha_index |= (u32)block[9 + pos * 3 / 8] << (8 - ((pos * 3) & 7));
             alpha_index &= 7;
-            alphas[0] = block[14]; alphas[1] = block[15];
+            alphas[0] = block[14];
+            alphas[1] = block[15];
+
             if (alphas[0] > alphas[1]) {
                 int i;
                 for (i = 2; i < 8; i++)
@@ -531,11 +577,14 @@ u32 texture_pixel(int x, int y)
                 int i;
                 for (i = 2; i < 6; i++)
                     alphas[i] = (u8)(((6 - i) * alphas[0] + (i - 1) * alphas[1]) / 5);
+
                 alphas[6] = 0;
                 alphas[7] = 255;
             }
+
             a = alphas[alpha_index];
         }
+
         return (rgb & 0xffffff) | (a << 24);
     }
 
@@ -584,6 +633,7 @@ u32 shade_pixel(u32 texture, u32 vertex)
             c = ge_div255(v * t);
             break;
         }
+
         result |= c << shift;
     }
 

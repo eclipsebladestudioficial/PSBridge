@@ -69,7 +69,6 @@ static int message_status;
 
 static u32 osk_params_address;
 
-
 static OskParams *osk_params(void)
 {
     return psbridge_game_pointer((void *)(uintptr_t)osk_params_address);
@@ -147,8 +146,6 @@ static int osk_update(void)
         }
 
         output[length] = 0;
-
-
     }
 
     params->state = 4;
@@ -169,6 +166,7 @@ static int osk_get_status(void)
         } else if (osk_status == DIALOG_FINISHED) {
             osk_status = DIALOG_NONE;
             osk_params_address = 0;
+
             if (params)
                 params->state = 0;
         }
@@ -179,10 +177,11 @@ static int osk_get_status(void)
 static int osk_shutdown(void)
 {
     OskParams *params = osk_params();
-    
+
     if (params)
         params->state = 5;
     osk_status = DIALOG_FINISHED;
+
     PRINT_LOG("osk terminou de gozar e liberou pra nós\n");
     return 0;
 }

@@ -57,6 +57,7 @@ static void ge3d_skinning_command(u32 command, u32 value)
             converted.bits = value << 8;
             ge_bones[index / 12u][index % 12u] = converted.f;
         }
+
         ge_bone_index = (index + 1u) & 127u;
     }
 }
@@ -261,10 +262,12 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands,
             float weight = weights[i];
             if (weight == 0.0f)
                 continue;
+
             sx += weight * (x * bone[0] + y * bone[3] + z * bone[6] + bone[9]);
             sy += weight * (x * bone[1] + y * bone[4] + z * bone[7] + bone[10]);
             sz += weight * (x * bone[2] + y * bone[5] + z * bone[8] + bone[11]);
         }
+
         x = sx;
         y = sy;
         z = sz;

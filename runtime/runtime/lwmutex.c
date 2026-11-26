@@ -275,6 +275,7 @@ static NativeMutex *native_mutex_find(int uid)
         if (native_mutexes[index].used && native_mutexes[index].uid == uid)
             return &native_mutexes[index];
     }
+
     return NULL;
 }
 
@@ -289,10 +290,12 @@ int psbridge_create_mutex(const char *name, u32 attributes, int initial_count, v
 
     if (initial_count < 0 || (initial_count > 1 && !(attributes & MUTEX_RECURSIVE)))
         return -1;
+
     for (index = 0; index < NATIVE_MUTEX_LIMIT; index++) {
         if (!native_mutexes[index].used)
             break;
     }
+
     if (index == NATIVE_MUTEX_LIMIT)
         return -1;
 
@@ -302,6 +305,7 @@ int psbridge_create_mutex(const char *name, u32 attributes, int initial_count, v
     sema = CreateSema(&config);
     if (sema < 0)
         return sema;
+
     config.init_count = 1;
     guard = CreateSema(&config);
     if (guard < 0) {
@@ -319,6 +323,7 @@ int psbridge_create_mutex(const char *name, u32 attributes, int initial_count, v
     mutex->count = initial_count;
     mutex->initial_count = initial_count;
     mutex->attributes = attributes;
+
     if (name) {
         const char *source = psbridge_game_pointer(name);
         if (source) {
@@ -326,6 +331,7 @@ int psbridge_create_mutex(const char *name, u32 attributes, int initial_count, v
             mutex->name[sizeof(mutex->name) - 1] = 0;
         }
     }
+
     return mutex->uid;
 }
 
@@ -351,6 +357,7 @@ int psbridge_refer_mutex_status(int uid, void *output)
         return (int)0x800201c3u;
     if (!status)
         return (int)0x800200d3u;
+
     available = status->size;
     if (available < sizeof(value))
         return (int)0x800200d2u;
@@ -389,10 +396,12 @@ int psbridge_lock_mutex(int uid, int count, void *timeout, int try_only)
             SignalSema(mutex->guard);
             return -1;
         }
+
         mutex->count += count;
         SignalSema(mutex->guard);
         return 0;
     }
+
     if (!try_only)
         mutex->waiters++;
     SignalSema(mutex->guard);
@@ -408,8 +417,10 @@ int psbridge_lock_mutex(int uid, int count, void *timeout, int try_only)
                 break;
             if (current_time() - started >= limit)
                 break;
+
             DelayThread(1000);
         } while (1);
+
         if (result < 0)
             *remaining = 0;
         else {
@@ -419,6 +430,7 @@ int psbridge_lock_mutex(int uid, int count, void *timeout, int try_only)
     } else {
         result = WaitSema(mutex->semaphore);
     }
+
     WaitSema(mutex->guard);
     if (!try_only && mutex->waiters > 0)
         mutex->waiters--;
@@ -426,6 +438,7 @@ int psbridge_lock_mutex(int uid, int count, void *timeout, int try_only)
         SignalSema(mutex->guard);
         return result;
     }
+
     mutex->owner = caller;
     mutex->count = count;
     SignalSema(mutex->guard);
@@ -437,11 +450,13 @@ int psbridge_unlock_mutex(int uid, int count)
     NativeMutex *mutex = native_mutex_find(uid);
     if (!mutex || count < 1)
         return -1;
+
     WaitSema(mutex->guard);
     if (mutex->owner != GetThreadId() || mutex->count < count) {
         SignalSema(mutex->guard);
         return -1;
     }
+
     mutex->count -= count;
     if (!mutex->count) {
         mutex->owner = -1;
@@ -456,11 +471,13 @@ int psbridge_delete_mutex(int uid)
     NativeMutex *mutex = native_mutex_find(uid);
     if (!mutex)
         return -1;
+
     WaitSema(mutex->guard);
     if (mutex->count) {
         SignalSema(mutex->guard);
         return -1;
     }
+
     mutex->used = 0;
     SignalSema(mutex->guard);
     DeleteSema(mutex->semaphore);

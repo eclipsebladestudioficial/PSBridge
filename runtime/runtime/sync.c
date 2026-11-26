@@ -122,6 +122,7 @@ int psbridge_sync_init(void)
         sync_lock = -1;
         return result;
     }
+
     return 0;
 }
 
@@ -198,6 +199,7 @@ int psbridge_refer_event_status(int uid, void *output)
         SignalSema(sync_lock);
         return BAD_ID;
     }
+
     info.size = sizeof(info);
     memcpy(info.name, event->name, sizeof(info.name));
     info.attributes = event->attributes;
@@ -598,6 +600,7 @@ static NativePspSema *find_psp_sema(int uid)
         if (psp_semas[i].used && psp_semas[i].uid == uid)
             return &psp_semas[i];
     }
+
     return NULL;
 }
 
@@ -612,24 +615,29 @@ int psbridge_create_semaphore(const char *name, u32 attributes, int initial, int
 
     if (maximum < 1 || initial < 0 || initial > maximum)
         return -1;
+
     for (idx = 0; idx < PSP_SEMA_LIMIT; idx++) {
         if (!psp_semas[idx].used)
             break;
     }
+
     if (idx == PSP_SEMA_LIMIT)
         return -1;
+
     memset(&cfg, 0, sizeof(cfg));
     cfg.init_count = maximum == 1 ? initial : 0;
     cfg.max_count = 1;
     native = CreateSema(&cfg);
     if (native < 0)
         return native;
+
     cfg.init_count = 1;
     guard = CreateSema(&cfg);
     if (guard < 0) {
         DeleteSema(native);
         return guard;
     }
+
     sema = &psp_semas[idx];
     memset(sema, 0, sizeof(*sema));
     sema->used = 1;
@@ -650,6 +658,7 @@ int psbridge_delete_semaphore(int uid)
     NativePspSema *sema = find_psp_sema(uid);
     if (!sema)
         return -1;
+
     sema->used = 0;
     DeleteSema(sema->semaphore);
     DeleteSema(sema->guard);
@@ -669,6 +678,7 @@ int psbridge_signal_semaphore(int uid, int count)
     if (sema->maximum == 1) {
         if (count != 1 || SignalSema(sema->semaphore) < 0)
             return SEMA_OVERFLOW;
+
         return 0;
     }
 
@@ -702,6 +712,7 @@ int psbridge_poll_semaphore(int uid, int count)
     result = WaitSema(sema->guard);
     if (result < 0)
         return result;
+
     if (!sema->used || sema->uid != uid) {
         result = UNKNOWN_SEMID;
     } else if (sema->count < count) {
@@ -766,6 +777,7 @@ int psbridge_wait_semaphore(int uid, int count, void *timeout, int callbacks)
     result = WaitSema(sema->guard);
     if (result < 0)
         return WAIT_DELETE;
+
     sema->waiting++;
     SignalSema(sema->guard);
 

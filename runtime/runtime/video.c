@@ -196,12 +196,14 @@ static u32 framebuffer_hash(const void *ptr, int width)
 
     if (!source || width < PSP_WIDTH || width > 2048)
         return 0;
+
     for (y = 8; y < PSP_HEIGHT; y += 16) {
         for (x = 8; x < PSP_WIDTH; x += 16) {
             hash ^= source[y * width + x];
             hash *= 16777619u;
         }
     }
+
     return hash;
 }
 
@@ -225,12 +227,14 @@ const void *psbridge_video_frame(int *stride, int *format)
 
     unsigned bytes = framebuffer_format == 3 ? 4 : 2;
     if (visible_offset < VIDEO_MEMORY_SIZE &&
-        ((PSP_HEIGHT - 1) * width + (width == PSP_BUFFER_WIDTH ? width : PSP_WIDTH)) * bytes > VIDEO_MEMORY_SIZE - visible_offset)
+        ((PSP_HEIGHT - 1) * width + (width == PSP_BUFFER_WIDTH ? width : PSP_WIDTH)) * bytes >
+            VIDEO_MEMORY_SIZE - visible_offset)
         return NULL;
 
     if (framebuffer_format == 3 && visible_offset <= 0x200000u - 0x88000u) {
         u32 current_hash = framebuffer_hash(source, width);
         int display_stale = display_vblank - last_display_vblank >= 12u;
+
         if (display_stale && !auto_source_active && ge_sequence &&
             ge_sequence != ge_frame_seq_seen && current_hash == frame_saved_hash &&
             ge_offset <= 0x200000u - 0x88000u && ge_offset != visible_offset) {
@@ -244,10 +248,12 @@ const void *psbridge_video_frame(int *stride, int *format)
                 }
             }
         }
+
         if (display_stale && auto_source_active && auto_source_offset == ge_offset) {
             source = vram + auto_source_offset;
             width = PSP_BUFFER_WIDTH;
         }
+
         frame_saved_hash = current_hash;
         ge_frame_seq_seen = ge_sequence;
     }
@@ -260,7 +266,13 @@ void psbridge_video_log_frame(u32 frame_count)
 {
     if (frame_count <= 4 || frame_count % 120 == 0) {
         const u32 *pixels = (const u32 *)framebuffer_pointer(framebuffer);
-        PSB_LOG(VIDEO, "frame gozando numero %u endereco %08x largura %d formato %d pixel %08x", frame_count, (u32)(uintptr_t)framebuffer, framebuffer_width, framebuffer_format, pixels ? pixels[0] : 0);
+
+        PSB_LOG(
+            VIDEO,
+            "frame gozando numero %u endereco %08x largura %d formato %d pixel %08x",
+            frame_count, (u32)(uintptr_t)framebuffer, framebuffer_width,
+            framebuffer_format, pixels ? pixels[0] : 0
+        );
     }
 }
 
@@ -282,26 +294,34 @@ extern inline __attribute__((always_inline)) u64 psbridge_display(u32 nid, u32 a
 
     if (nid == 0x289d82fe) {
         display_set_count++;
-        if (display_set_count <= 20 || display_set_count % 100 == 0) PSB_LOG(VIDEO, "display trocou a frica %u endereco %08x stride %u formato %u", display_set_count, a0, a1, a2);
+        if (display_set_count <= 20 || display_set_count % 100 == 0)
+            PSB_LOG(VIDEO, "display trocou a frica %u endereco %08x stride %u formato %u",
+                display_set_count, a0, a1, a2);
+
         framebuffer = (const void *)(uintptr_t)a0;
         last_display_vblank = current_vcount();
         auto_source_active = 0;
+
         {
             const void *resolved = framebuffer_pointer(framebuffer);
             u32 base = (u32)(uintptr_t)psbridge_video_memory();
             u32 address = (u32)(uintptr_t)resolved;
+
             if (resolved && address >= base && address - base <= 0x200000u - 0x88000u) {
                 u32 offset = address - base;
                 int i;
                 int known = 0;
+
                 for (i = 0; i < known_video_count; i++) {
                     if (known_video_buffers[i] == offset)
                         known = 1;
                 }
+
                 if (!known && known_video_count < 2)
                     known_video_buffers[known_video_count++] = offset;
             }
         }
+
         framebuffer_width = a1;
         framebuffer_format = a2;
         (void)a3;

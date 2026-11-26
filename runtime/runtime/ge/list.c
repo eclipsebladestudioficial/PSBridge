@@ -14,6 +14,7 @@ GeCallback *find_ge_callback(int id)
         if (ge_callbacks[i].used && ge_callbacks[i].id == id)
             return &ge_callbacks[i];
     }
+
     return NULL;
 }
 
@@ -23,6 +24,7 @@ int register_ge_callback(u32 address)
     int i;
     if (!data)
         return -1;
+
     for (i = 0; i < 16; i++) {
         if (!ge_callbacks[i].used) {
             GeCallback *cb = &ge_callbacks[i];
@@ -37,6 +39,7 @@ int register_ge_callback(u32 address)
             return cb->id;
         }
     }
+
     return -1;
 }
 
@@ -47,19 +50,18 @@ static void fire_ge_callback(int callback_id, int finish, u32 data)
     u32 argument;
     if (!cb)
         return;
+
     function = finish ? cb->finish_function : cb->signal_function;
     argument = finish ? cb->finish_arg : cb->signal_arg;
     if (!function)
         return;
+
     diag_ge_callbacks++;
     if (diag_ge_callbacks <= 16 || (diag_ge_callbacks % 128 == 0))
         PSB_LOG(GE, "ge callback %s gozou id %d dado %08x endereco %08x vezes %u",
             finish ? "fim" : "sinal", callback_id, data, function, diag_ge_callbacks);
     psbridge_call_callback((void *)(uintptr_t)function, data, argument, 0);
 }
-
-
-
 
 void *ge_pointer(u32 address)
 {
@@ -80,6 +82,7 @@ void *ge_pointer(u32 address)
         void *result = psbridge_game_pointer((void *)(uintptr_t)address);
         if ((u32)(uintptr_t)result == address && address >= 0x00200000 && address < 0x02000000)
             return (void *)(uintptr_t)(address | 0x80000000);
+
         return result;
     }
 }
@@ -140,11 +143,13 @@ GeList *find_list(int id)
 void execute_list(GeList *list)
 {
     int commands = 0;
+
     psbridge_graphics_lock();
     if (list->done) {
         psbridge_graphics_unlock();
         return;
     }
+
     ge_hardware_texture_dirty();
     ge_dxt_new_list();
 
@@ -180,7 +185,6 @@ void execute_list(GeList *list)
         ge3d_command(command, argument);
 
         if (command == GE_TEXFUNC || command == GE_VERTEXTYPE || command == GE_TEXFORMAT) {
-
             static int ge_rgb01_logs = 0;
 
             if (ge_rgb01_logs < 18) {
@@ -193,9 +197,7 @@ void execute_list(GeList *list)
                     (unsigned int)argument
                 );
             }
-
         }
-
 
         if (command == GE_VADDR)
             ge_state.vertex_address = relative_address(argument);
@@ -213,14 +215,12 @@ void execute_list(GeList *list)
             ge_hardware_cpu_write();
             transfer_pixels();
             ge_dxt_dirty();
-        }
-        else if (command == GE_LOADCLUT) {
+        } else if (command == GE_LOADCLUT) {
             load_clut(argument);
         } else if (command == 0xcb) {
             ge_hardware_texture_dirty();
             ge_dxt_dirty();
-        }
-        else if (command == GE_JUMP)
+        } else if (command == GE_JUMP)
             list->pc = relative_address(argument & 0x00fffffc);
         else if (command == GE_CALL && list->stack_size < GE_STACK_LIMIT) {
             list->stack[list->stack_size] = list->pc;
@@ -242,11 +242,14 @@ void execute_list(GeList *list)
             list->done = 1;
             if (list->draws) {
                 u32 target = buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH);
-                if (target <= 0x200000u - 0x88000u && (ge_state.command[GE_FRAMEBUF_FORMAT] & 3u) == 3u) {
+
+                if (target <= 0x200000u - 0x88000u &&
+                    (ge_state.command[GE_FRAMEBUF_FORMAT] & 3u) == 3u) {
                     ge_ready_buffer = target;
                     ge_ready_sequence++;
                 }
             }
+
             int callback = list->callback_id;
             int pending_signal = list->pending_signal;
             int pending_finish = list->pending_finish;
@@ -262,6 +265,7 @@ void execute_list(GeList *list)
             return;
         }
     }
+
     ge_hardware_flush();
     if (commands >= GE_COMMAND_LIMIT) {
         list->done = 1;
@@ -290,6 +294,7 @@ int enqueue_list(u32 address, u32 stall, int callback_id)
     if (!list) {
         return -1;
     }
+
     memset(list, 0, sizeof(*list));
     list->used = 1;
     list->id = next_list_id++;

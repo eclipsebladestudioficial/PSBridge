@@ -152,6 +152,7 @@ static int atrac_load(AtracContext *id, u32 address, u32 size)
         advance = chunk_size + (chunk_size & 1u);
         if (advance > remaining)
             return -1;
+
         position += 8 + advance;
     }
 
@@ -226,6 +227,7 @@ static inline __attribute__((always_inline)) u64 atrac_call(u32 nid, u32 a0, u32
     if (nid == 0x868120b5) {
         if (!id->initialized || !id->has_loop)
             return (u32)-1;
+
         id->loop_count = (int)a1;
         return 0;
     }
@@ -238,6 +240,7 @@ static inline __attribute__((always_inline)) u64 atrac_call(u32 nid, u32 a0, u32
         u32 *has_loop = audio_pointer(a2, sizeof(u32));
         if (!loops || !has_loop || !id->initialized)
             return (u32)-1;
+
         *loops = (u32)id->loop_count;
         *has_loop = id->has_loop;
         return 0;
@@ -270,6 +273,7 @@ static inline __attribute__((always_inline)) u64 atrac_call(u32 nid, u32 a0, u32
             *value = (u32)(((u64)id->bytes_per_second * 8 + 500) / 1000);
         else
             *value = 0;
+
         return 0;
     }
 
@@ -281,6 +285,7 @@ static inline __attribute__((always_inline)) u64 atrac_call(u32 nid, u32 a0, u32
         if (!id->initialized || !total || (a2 && !loop_start) ||
             (a3 && !loop_end))
             return (u32)-1;
+
         *total = id->sample_count;
         if (loop_start)
             *loop_start = id->has_loop ? id->loop_start : 0xffffffffu;
@@ -395,6 +400,7 @@ static u64 audio2_call(u32 nid, u32 a0)
     if (nid == 0x63f2889c) {
         if (!audio2_reserved || a0 < 17 || a0 > 4111)
             return (u32)-1;
+
         audio2_samples = a0;
         return 0;
     }
@@ -467,6 +473,7 @@ static inline __attribute__((always_inline)) u64 audio_channel_call(u32 nid, u32
     if (nid == 0xcb2e439e) {
         if (!audio_valid_length(a1))
             return (u32)-1;
+
         channel->samples = a1;
         return 0;
     }
@@ -474,6 +481,7 @@ static inline __attribute__((always_inline)) u64 audio_channel_call(u32 nid, u32
     if (nid == 0x95fd0c2d) {
         if (a1 != 0 && a1 != 0x10)
             return (u32)-1;
+
         channel->format = a1;
         return 0;
     }

@@ -28,7 +28,7 @@ static u64 system_time(void)
 #define LIB_KERNEL 0xff65d9d0
 #define LIB_AUDIO 0xf41677cc
 #define LIB_CTRL 0x6e7a8e3b
-#define LIB_UTILITY  0x241c3336
+#define LIB_UTILITY 0x241c3336
 #define LIB_GE 0x412aa1a0
 #define LIB_THREADMAN 0x9aacf809
 #define LIB_UTILS 0xa8587892
@@ -50,10 +50,12 @@ static u64 unknown_import(u32 library, u32 nid, u32 callsite)
     static u32 unknown[32][2];
     static int unknown_count;
     int i;
+
     for (i = 0; i < unknown_count; i++) {
         if (unknown[i][0] == library && unknown[i][1] == nid)
             break;
     }
+
     if (i == unknown_count && unknown_count < 32) {
         unknown[unknown_count][0] = library;
         unknown[unknown_count][1] = nid;
@@ -62,6 +64,7 @@ static u64 unknown_import(u32 library, u32 nid, u32 callsite)
             (unsigned long)library, (unsigned long)nid,
             (unsigned long)callsite);
     }
+
     return -1;
 }
 
@@ -88,12 +91,12 @@ static inline __attribute__((always_inline)) u64 import_service(
                 (const char *)a1,
                 (int)a2,
                 a3,
-                (void*) a4
+                (void *)a4
             );
         }
 
         if (nid == 0x9d9a5ba1)
-            return (u32) (uintptr_t)psbridge_block_address((int)a0);
+            return (u32)(uintptr_t)psbridge_block_address((int)a0);
 
         if (nid == 0xb6d61d02)
             return psbridge_free_partition((int)a0);
@@ -174,7 +177,7 @@ static inline __attribute__((always_inline)) u64 import_service(
                 !strcmp(device, "fatms0:") &&
                 a1 == 0x2415821 &&
                 a2 &&
-                a3 >=4
+                a3 >= 4
             )
                 return 0;
 
@@ -314,6 +317,7 @@ static inline __attribute__((always_inline)) u64 import_service(
             return psbridge_refer_semaphore((int)a0, (void *)(uintptr_t)a1);
         if (nid == 0x58b1f937)
             return psbridge_poll_semaphore((int)a0, (int)a1);
+
         if (nid == 0x9ace131e)
             return SleepThread();
         if (nid == 0xd59ead2f)
@@ -343,10 +347,14 @@ static inline __attribute__((always_inline)) u64 import_service(
             return psbridge_refer_mutex_status((int)a0, (void *)(uintptr_t)a1);
 
         if (nid == 0xb7d098c6)
-            return psbridge_create_mutex((const char *)(uintptr_t)a0, a1, (int)a2, (void *)(uintptr_t)a3);
+            return psbridge_create_mutex(
+                (const char *)(uintptr_t)a0, a1, (int)a2, (void *)(uintptr_t)a3
+            );
 
         if (nid == 0xb011b11f || nid == 0x5bf4dd27 || nid == 0x0ddcd2c9)
-            return psbridge_lock_mutex((int)a0, (int)a1, (void *)(uintptr_t)a2, nid == 0x0ddcd2c9);
+            return psbridge_lock_mutex(
+                (int)a0, (int)a1, (void *)(uintptr_t)a2, nid == 0x0ddcd2c9
+            );
 
         if (nid == 0x6b30100f)
             return psbridge_unlock_mutex((int)a0, (int)a1);
@@ -385,7 +393,7 @@ static inline __attribute__((always_inline)) u64 import_service(
 
         if (nid == 0xe9b3061e)
             return psbridge_send_mailbox(
-                (int) a0,
+                (int)a0,
                 (void *)a1
             );
 
@@ -482,7 +490,7 @@ static inline __attribute__((always_inline)) u64 import_service(
             );
 
         if (nid == 0x623ae665)
-            return psbridge_allocate_fpl((int)a0, (void**)a1);
+            return psbridge_allocate_fpl((int)a0, (void **)a1);
 
         if (nid == 0xed1410e0)
             return psbridge_delete_fpl((int)a0);
@@ -494,7 +502,7 @@ static inline __attribute__((always_inline)) u64 import_service(
                 (int)a2,
                 (int)a3,
                 a4,
-                (void *) a5
+                (void *)a5
             );
         }
 
@@ -518,6 +526,7 @@ static inline __attribute__((always_inline)) u64 import_service(
 
             if (descriptor < 0)
                 return descriptor;
+
             module = psbridge_load_firmware_module(descriptor);
             psbridge_file_close(descriptor);
             return module;
@@ -535,6 +544,7 @@ static inline __attribute__((always_inline)) u64 import_service(
             if (address >= guest_info.base &&
                 address - guest_info.base < guest_info.memory_size)
                 return 1;
+
             return -1;
         }
 
@@ -563,6 +573,7 @@ static inline __attribute__((always_inline)) u64 import_service(
             u64 clock = system_time();
             if (a0 && !timeval)
                 return -1;
+
             if (timeval) {
                 timeval[0] = (u32)(clock / 1000000) + 946684800u;
                 timeval[1] = (u32)(clock % 1000000);
@@ -582,17 +593,19 @@ static inline __attribute__((always_inline)) u64 import_service(
                 u32 *output = psbridge_game_pointer((void *)(uintptr_t)a0);
                 if (!output)
                     return -1;
+
                 *output = now;
             }
+
             return now;
         }
 
-        if(nid ==0xb435dec5) {
+        if (nid == 0xb435dec5) {
             FlushCache(0);
             return 0;
         }
 
-        if(nid == 0x3ee30821)
+        if (nid == 0x3ee30821)
             return 0;
 
         if (nid == 0x79d1c3fa)
@@ -641,13 +654,14 @@ static inline __attribute__((always_inline)) u64 import_service(
     }
 
     if (library == LIB_SUSPEND) {
-            if (nid == 0x090ccb3f)
-                return 0;
-            if (nid == 0x3e0271d3)
-                return psbridge_volatile_lock((void *)a1, (void *)a2);
+        if (nid == 0x090ccb3f)
+            return 0;
 
-            if (nid == 0xa569e425)
-                return psbridge_volatile_unlock();
+        if (nid == 0x3e0271d3)
+            return psbridge_volatile_lock((void *)a1, (void *)a2);
+
+        if (nid == 0xa569e425)
+            return psbridge_volatile_unlock();
     }
 
     return unknown_import(library, nid, callsite);

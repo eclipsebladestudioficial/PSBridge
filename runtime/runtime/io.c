@@ -122,6 +122,7 @@ static int host_path(const char *path, char *output)
         length = snprintf(resolved, sizeof(resolved), "%s%s", current_psp_dir, game_path);
         if (length < 0 || length >= (int)sizeof(resolved))
             return -1;
+
         game_path = resolved;
     }
 
@@ -540,12 +541,15 @@ int psbridge_file_chdir(const char *path)
     length = strlen(resolved);
     if (!length)
         return -1;
+
     if (resolved[length - 1] != '/') {
         if (length + 1 >= sizeof(resolved))
             return -1;
+
         resolved[length++] = '/';
         resolved[length] = 0;
     }
+
     memcpy(current_psp_dir, resolved, length + 1);
     return 0;
 }
@@ -558,6 +562,7 @@ int psbridge_file_dopen(const char *path)
 
     if (host_path(path, translated) < 0)
         return -1;
+
     dir = opendir(translated);
     if (!dir)
         return -1;
@@ -572,6 +577,7 @@ int psbridge_file_dopen(const char *path)
             return PSP_DIR_BASE + index;
         }
     }
+
     closedir(dir);
     return -1;
 }
@@ -603,6 +609,7 @@ int psbridge_file_dread(int uid, void *output)
         destination->stat.attributes = is_directory ? 0x10 : 0x20;
         destination->stat.size = (u64)source.st_size;
     }
+
     return 1;
 }
 
@@ -613,6 +620,7 @@ int psbridge_file_dclose(int uid)
 
     if (index < 0 || index >= PSP_DIR_LIMIT || !directory_handles[index].used)
         return -1;
+
     handle = &directory_handles[index];
     closedir(handle->stream);
     memset(handle, 0, sizeof(*handle));
@@ -702,6 +710,7 @@ static PspPgd *find_pgd(int descriptor, int create)
     for (i = 0; i < PSP_ASYNC_LIMIT; i++) {
         if (pgd_handles[i].used && pgd_handles[i].descriptor == descriptor)
             return &pgd_handles[i].pgd;
+
         if (empty < 0 && !pgd_handles[i].used)
             empty = i;
     }
@@ -734,11 +743,14 @@ static int register_async_result(int descriptor, s64 result)
             async_handles[index].result = result;
             return 0;
         }
+
         if (!async_handles[index].used && free_slot < 0)
             free_slot = index;
     }
+
     if (free_slot < 0)
         return -1;
+
     async_handles[free_slot].used = 1;
     async_handles[free_slot].descriptor = descriptor;
     async_handles[free_slot].result = result;
@@ -754,6 +766,7 @@ int psbridge_file_open_async(const char *path, int flags, int mode)
         psbridge_file_close(descriptor);
         return -1;
     }
+
     return descriptor;
 }
 
@@ -763,14 +776,17 @@ int psbridge_file_async_wait(int descriptor, void *output, int polling)
     int index;
     if (!result)
         return -1;
+
     for (index = 0; index < PSP_ASYNC_LIMIT; index++) {
         if (!async_handles[index].used || async_handles[index].descriptor != descriptor)
             continue;
+
         *result = async_handles[index].result;
         if (!polling)
             memset(&async_handles[index], 0, sizeof(async_handles[index]));
         return 0;
     }
+
     return -1;
 }
 
@@ -779,6 +795,7 @@ int psbridge_file_read_async(int descriptor, void *buffer, u32 size)
     int result = psbridge_file_read(descriptor, buffer, size);
     if (result < 0)
         return result;
+
     return register_async_result(descriptor, result);
 }
 
@@ -787,6 +804,7 @@ int psbridge_file_write_async(int descriptor, const void *buffer, u32 size)
     int result = psbridge_file_write(descriptor, buffer, size);
     if (result < 0)
         return result;
+
     return register_async_result(descriptor, result);
 }
 
@@ -795,6 +813,7 @@ int psbridge_file_close_async(int descriptor)
     int result = psbridge_file_close(descriptor);
     if (result < 0)
         return result;
+
     return register_async_result(descriptor, result);
 }
 
@@ -914,6 +933,7 @@ int psbridge_file_write(int descriptor, const void *buffer, u32 size)
             PRINT_LOG("umd ta prontinha pra ser lida\n");
             return size;
         }
+
         found = strstr(message, "couldn't find file ");
         if (found) {
             const char *name = found + sizeof("couldn't find file ") - 1;
@@ -965,6 +985,7 @@ int psbridge_file_seek_async(int descriptor, u32 low, u32 high, int whence)
 
     if (result < 0)
         return (int)result;
+
     return register_async_result(descriptor, result);
 }
 
@@ -1050,9 +1071,11 @@ static int pgd_ioctl(int descriptor, u32 command, u32 raw_input, const void *inp
         position = lseek(descriptor, 0, SEEK_CUR);
         if (position < 0)
             return -1;
+
         end = lseek(descriptor, 0, SEEK_END);
         if (lseek(descriptor, position, SEEK_SET) < 0 || end < 0)
             return -1;
+
         return end;
     }
 
@@ -1098,6 +1121,7 @@ int psbridge_file_ioctl(
     if (!handle) {
         if (command == 0x04100001 || command == 0x04100002 || command == 0x04100010)
             return pgd_ioctl(descriptor, command, (u32)(uintptr_t)input, input_data, input_size);
+
         return -1;
     }
 

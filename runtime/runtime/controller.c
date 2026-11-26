@@ -144,8 +144,10 @@ static void controller_update_history(void)
         current.lx = 128;
         current.ly = 128;
         current.timestamp = (u32)now;
+
         for (index = 0; index < CTRL_HISTORY_SIZE; index++)
             controller_history[index] = current;
+
         controller_written = CTRL_HISTORY_SIZE;
         controller_last_read = controller_written - 1;
         controller_last_sample = now;
@@ -226,6 +228,7 @@ extern inline __attribute__((always_inline)) int psbridge_controller_read(void *
             DelayThread(1000);
             controller_update_history();
         }
+
         available = controller_written - controller_last_read;
         if (available > (u64)count)
             available = count;

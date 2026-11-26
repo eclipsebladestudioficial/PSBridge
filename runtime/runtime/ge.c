@@ -47,6 +47,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_ge(u32 nid, u32 a0, u3
         GeCallback *cb = find_ge_callback((int)a0);
         if (!cb)
             return (u32)-1;
+
         memset(cb, 0, sizeof(*cb));
         return 0;
     }

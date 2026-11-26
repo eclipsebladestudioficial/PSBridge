@@ -44,6 +44,7 @@ int main(void)
     }
 
     PSB_LOG(BOOT, "pulando pro jogo");
+
     int result = psbridge_start();
     PSB_LOG(BOOT, "o jogo voltou com %d", result);
 

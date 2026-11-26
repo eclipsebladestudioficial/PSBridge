@@ -1016,6 +1016,7 @@ static inline __attribute__((always_inline)) u32 shade_pixel_cached(
         } else {
             color = raster_div255(v * t);
         }
+
         result |= color << shift;
     }
 
@@ -1116,6 +1117,7 @@ static inline __attribute__((always_inline)) int raster_compare(
         return value <= reference;
     if (function == 6)
         return value > reference;
+
     return value >= reference;
 }
 
@@ -1213,6 +1215,7 @@ static inline __attribute__((always_inline)) void triangle_target_store(
                     *depth_buffer = value;
                 return;
             }
+
             if ((color >> 24) != 255)
                 color = blend_dxt_packed(color, *frame);
         } else {
@@ -1233,9 +1236,11 @@ static int triangle_target_setup(TriangleTarget *target, int format)
     if ((ge_state.command[GE_FRAMEBUF_FORMAT] & 3) != format ||
         target->width < 64 || target->width > 2048)
         return 0;
+
     target->frame = ge_pointer(buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH));
     if (!target->frame)
         return 0;
+
     target->clear = ge_state.command[GE_CLEARMODE];
     target->blend = ge_state.command[GE_BLEND_ENABLE] & 1;
     target->blend_source_alpha = !ge_blend_mode_seen || blend_mode == 0x32;
@@ -1284,27 +1289,39 @@ static inline void triangle_scan_span(
         int next = (i + 1) % 3;
         float y0 = yy[i];
         float y1 = yy[next];
+
         if ((y0 <= py && py <= y1) || (y1 <= py && py <= y0)) {
             if (y0 != y1) {
                 float at = xx[i] + (py - y0) * (xx[next] - xx[i]) / (y1 - y0);
-                if (at < minx) minx = at;
-                if (at > maxx) maxx = at;
+
+                if (at < minx)
+                    minx = at;
+                if (at > maxx)
+                    maxx = at;
             }
         }
     }
+
     if (maxx < minx) {
         *start = right + 1;
         *end = right;
         return;
     }
+
     if (minx > left + 2.0f) {
         int n = (int)minx - 2;
-        if (n > left) left = n;
+
+        if (n > left)
+            left = n;
     }
+
     if (maxx < right - 2.0f) {
         int n = (int)maxx + 2;
-        if (n < right) right = n;
+
+        if (n < right)
+            right = n;
     }
+
     *start = left;
     *end = right;
 }
@@ -1374,6 +1391,7 @@ static const u32 *triangle_5551_span_colors(
             texel = shade_pixel_cached(texel, color, texfunc & 7, texfunc & 0x100, environment);
         else if (!(texfunc & 0x100))
             texel |= 0xff000000u;
+
         u32 alpha = texel >> 24;
         if ((target->alpha_test && !raster_compare(target->alpha_function,
             alpha & target->alpha_mask, target->alpha_reference)) ||
@@ -1381,8 +1399,10 @@ static const u32 *triangle_5551_span_colors(
             texel = 0;
         else if (!target->blend || alpha == 255)
             texel = 0xff000000u | pack_color_5551(texel);
+
         colors[index] = texel;
     }
+
     return colors;
 }
 
@@ -1402,6 +1422,7 @@ static void fill_span_5551(u16 *span, int count, u16 pixel)
     __asm__ volatile (
         "pcpyld %0, %0, %0" : "+r"(repeated)
     );
+
     while (count >= 8) {
         __asm__ volatile ("sq %1, 0(%0)" :: "r"(span), "r"(repeated) : "memory");
         span += 8;
@@ -1440,6 +1461,7 @@ static void draw_indexed_span_5551(
             u64 pixels = (u16)a | ((u64)(u16)b << 16) |
                 ((u64)(u16)c << 32) | ((u64)(u16)d << 48);
             memcpy(frame, &pixels, sizeof(pixels));
+
             if (depth) {
                 if (a & b & c & d & 0x10000) {
                     memcpy(depth, &repeated_depth, sizeof(repeated_depth));
@@ -1453,8 +1475,10 @@ static void draw_indexed_span_5551(
                     if (d & 0x10000)
                         depth[3] = z;
                 }
+
                 depth += 4;
             }
+
             frame += 4;
             indices += 4;
             count -= 4;
@@ -1506,6 +1530,7 @@ static int draw_right_triangle_5551(
             horizontal = vertical;
             vertical = swap;
         }
+
         if (corner.y == horizontal.y && corner.x == vertical.x)
             break;
     }
@@ -1568,6 +1593,7 @@ static int draw_right_triangle_5551(
             ge_state.command[GE_TEXENVCOLOR]);
         for (int i = 0; i < 256; i++)
             any_color |= colors[i] != 0;
+
         if (!any_color)
             return 1;
     } else {
@@ -1582,6 +1608,7 @@ static int draw_right_triangle_5551(
         int y_from_corner = dy > 0 ? y - cy : cy - 1 - y;
         if (y_from_corner < 0 || y_from_corner >= height)
             continue;
+
         int span = (width * (2 * (height - y_from_corner) - 1) + height) / (2 * height);
         int start = dx > 0 ? cx : cx - span;
         int end = dx > 0 ? cx + span : cx;
@@ -1621,6 +1648,7 @@ static int draw_right_triangle_5551(
                 count = 16 - (tx & 15);
             if (count > end - start)
                 count = end - start;
+
             int offset = pixel_offset(tx, ty, texture.row_bytes, 1, texture.swizzled);
             draw_indexed_span_5551(out + start, z_out ? z_out + start : NULL, z, count,
                 texture.texture + offset, colors, uniform >= 0 ? uniform_colors : NULL,
@@ -1628,6 +1656,7 @@ static int draw_right_triangle_5551(
             start += count;
         }
     }
+
     return 1;
 }
 
@@ -1770,12 +1799,14 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 
     if (ge_hardware_triangle(a, b, c, left, top, right + 1, bottom + 1))
         return;
+
     ge_hardware_cpu_write();
 
     fast_5551 = triangle_target_setup(&target, 1);
     if (fast_5551 && (ge_state.command[GE_VERTEXTYPE] & (1 << 23)) &&
         draw_right_triangle_5551(&target, a, b, c, left, top, right, bottom, textured))
         return;
+
     fast_target = !fast_5551 && triangle_target_setup(&target, 3);
     affine = a.inv_w == 1.0f && b.inv_w == 1.0f && c.inv_w == 1.0f;
     texfunc = ge_state.command[GE_TEXFUNC] & 7;
@@ -1918,6 +1949,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                 v += tex_v_dx;
                 z += z_dx;
             }
+
             if (xstart <= xend) {
                 float wa_end = wa + (float)(xend - xstart) * wa_dx;
                 float wb_end = wb + (float)(xend - xstart) * wb_dx;
@@ -1928,6 +1960,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                     wa_end -= wa_dx;
                     wb_end -= wb_dx;
                 }
+
                 if (direct_target && dxt.ready_complete) {
                     u32 *out = target.frame + y * target.width + xstart;
                     int count = xend - xstart + 1;
@@ -1943,6 +1976,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                         dv_error > -0.04f && dv_error < 0.04f &&
                         uf > 0.08f && uf < 0.92f &&
                         vf > 0.08f && vf < 0.92f;
+
                     if (linear) {
                         const u32 *pixels = dxt.ready_pixels + iv * dxt.width + iu;
                         if (dxt.ready_opaque || (!target.blend && tex_alpha)) {
@@ -1958,6 +1992,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                                         x++;
                                     } while (x < count &&
                                         (!tex_alpha || (pixels[x] >> 24) == 255u));
+
                                     if (tex_alpha)
                                         memcpy(out + begin, pixels + begin, (x - begin) * sizeof(u32));
                                     else {
@@ -2023,12 +2058,14 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                     }
                 }
             }
+
             wa_row += wa_dy;
             wb_row += wb_dy;
             tex_u_row += tex_u_dy;
             tex_v_row += tex_v_dy;
             z_row += z_dy;
         }
+
         return;
     }
 
@@ -2122,6 +2159,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                         fast_rgba ? triangle_rgba_texture_pixel(&rgba_texture, tx, ty) :
                         fast_indexed ? triangle_indexed_texture_pixel(&fast, tx, ty) :
                         texture_pixel(tx, ty);
+
                     if (direct_white) {
                         color = texel;
                         if (!tex_use_alpha)
@@ -2188,6 +2226,7 @@ static float clip_distance(GeVertex v, int plane)
         return v.clip_w - v.clip_y;
     if (plane == 4)
         return v.clip_z + v.clip_w;
+
     return v.clip_w - v.clip_z;
 }
 
@@ -2278,9 +2317,13 @@ static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, 
     polygon[0] = a;
     polygon[1] = b;
     polygon[2] = c;
-    if (clip_distance(a, 4) < 0.0f) outside_near++;
-    if (clip_distance(b, 4) < 0.0f) outside_near++;
-    if (clip_distance(c, 4) < 0.0f) outside_near++;
+
+    if (clip_distance(a, 4) < 0.0f)
+        outside_near++;
+    if (clip_distance(b, 4) < 0.0f)
+        outside_near++;
+    if (clip_distance(c, 4) < 0.0f)
+        outside_near++;
 
     if (clipping_enabled && outside_near) {
         int output_count = 0;
@@ -2304,6 +2347,7 @@ static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, 
             previous_distance = current_distance;
             previous_inside = current_inside;
         }
+
         count = output_count;
         for (i = 0; i < count; i++)
             polygon[i] = clipped[i];
@@ -2311,6 +2355,7 @@ static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, 
 
     if (!count)
         return;
+
     for (i = 0; i < count; i++) {
         if (!ge3d_project_vertex(&polygon[i], ge_state.command)) {
             return;
@@ -2318,9 +2363,12 @@ static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, 
         if (ge3d_outside_screen(polygon[i], ge_state.command)) {
             return;
         }
+
         if (clipping_enabled) {
-            if (polygon[i].z < 0.0f) polygon[i].z = 0.0f;
-            if (polygon[i].z > 65535.0f) polygon[i].z = 65535.0f;
+            if (polygon[i].z < 0.0f)
+                polygon[i].z = 0.0f;
+            if (polygon[i].z > 65535.0f)
+                polygon[i].z = 65535.0f;
         } else if (polygon[i].z < 0.0f || polygon[i].z >= 65536.0f) {
             return;
         }

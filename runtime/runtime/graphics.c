@@ -112,6 +112,7 @@ static inline __attribute__((always_inline)) u32 hash_frame_samples(
                 memcpy(&pixel16, sample, sizeof(pixel16));
                 pixel = pixel16;
             }
+
             hash = (hash ^ pixel) * 16777619u;
         }
     }
@@ -125,6 +126,7 @@ static u32 frame_hash(const u8 *source, int stride, int bytes)
         return hash_frame_samples(source, stride, 4, 1);
     if (bytes == 2 && !((uintptr_t)source & 1))
         return hash_frame_samples(source, stride, 2, 1);
+
     return hash_frame_samples(source, stride, bytes, 0);
 }
 
@@ -139,6 +141,7 @@ int psbridge_graphics_draw_target(u32 *target)
 {
     if (psbridge_graphics_start() < 0)
         return -1;
+
     gs_frame_source = NULL;
     *target = gs->ScreenBuffer[draw_buffer];
     return 0;
@@ -148,6 +151,7 @@ u32 psbridge_graphics_alloc_texture(unsigned size)
 {
     if (psbridge_graphics_start() < 0)
         return GSKIT_ALLOC_ERROR;
+
     return gsKit_vram_alloc(gs, size, GSKIT_ALLOC_USERBUFFER);
 }
 
@@ -221,6 +225,7 @@ static void upload_frame(const u8 *source, int width, int format, int bytes, int
                             ((pixel >> 1) & 0x400);
                 }
             }
+
             memset(destination + PSP_WIDTH * bytes, 0, (PSP_BUFFER_WIDTH - PSP_WIDTH) * bytes);
         }
 
@@ -241,6 +246,7 @@ static void present_frame(void)
     const void *source = psbridge_video_frame(&stride, &format);
     if (!source)
         format = -1;
+
     int bytes = format == 3 ? 4 : 2;
     u32 hash = source ? frame_hash(source, stride, bytes) : 0;
 
@@ -264,6 +270,7 @@ static void present_frame(void)
         GS_SETREG_CSR_FINISH(1);
         upload_frame(source, stride, format, bytes, psm);
         send_gif(finish, sizeof(finish));
+
         while (!(GS_CSR_FINISH))
             __asm__ volatile("nop");
     }

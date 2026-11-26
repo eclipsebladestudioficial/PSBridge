@@ -36,6 +36,7 @@ int vfpu_vector_lane(int r, int n, int lane)
     int row = n == 1 ? (r >> 5) & 3 : n == 3 ? (r >> 6) & 1 : (r >> 5) & 2;
     if (n != 1 && (r & 0x20))
         return m * 4 + ((row + lane) & 3) + col * 32;
+
     return m * 4 + col + ((row + lane) & 3) * 32;
 }
 int vfpu_matrix_lane(int r, int n, int column, int rowidx)
@@ -44,6 +45,7 @@ int vfpu_matrix_lane(int r, int n, int column, int rowidx)
     int row = n == 3 ? (r >> 6) & 1 : (r >> 5) & 2;
     if (r & 0x20)
         return m * 4 + ((row + rowidx) & 3) + ((col + column) & 3) * 32;
+
     return m * 4 + ((col + column) & 3) + ((row + rowidx) & 3) * 32;
 }
 void vfpu_read_vector(int r, int n, float out[4])
@@ -63,6 +65,7 @@ void vfpu_read_prefix(int r, int n, float out[4], u32 p, int active)
         memcpy(out, original, sizeof(original));
         return;
     }
+
     for (i = 0; i < n; i++)
     {
         int src = (p >> (i * 2)) & 3;
@@ -75,6 +78,7 @@ void vfpu_read_prefix(int r, int n, float out[4], u32 p, int active)
         }
         else if (p & (1u << (8 + i)))
             v = fabsf(v);
+
         if (p & (1u << (16 + i)))
             v = -v;
         out[i] = v;
@@ -96,6 +100,7 @@ void vfpu_write_vector(int r, int n, const float in[4], int use_prefix)
                 if (v > 1)
                     v = 1;
             }
+
             if (sat == 3)
             {
                 if (v < -1)
@@ -103,9 +108,11 @@ void vfpu_write_vector(int r, int n, const float in[4], int use_prefix)
                 if (v > 1)
                     v = 1;
             }
+
             if (vfpu_prefix_d & (1u << (8 + i)))
                 continue;
         }
+
         vfpu_vr[vfpu_vector_lane(r, n, i)] = vfpu_as_bits(v);
     }
 }

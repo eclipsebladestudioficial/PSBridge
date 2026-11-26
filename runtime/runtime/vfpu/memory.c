@@ -19,6 +19,7 @@ void *vfpu_checked_pointer(u32 raw, u32 bytes)
             return (void *)(uintptr_t)raw;
         goto bad;
     }
+
     ram = psbridge_ram_pointer(raw, bytes);
     if (ram)
         return ram;

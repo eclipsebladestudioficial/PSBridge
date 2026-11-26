@@ -188,6 +188,7 @@ static PspThread *find_thread(int uid)
         if (threads[index].used > 0 && threads[index].uid == uid)
             return &threads[index];
     }
+
     return NULL;
 }
 
@@ -197,6 +198,7 @@ static PspThread *find_thread_by_host_id(int id)
         if (threads[index].used > 0 && threads[index].thread_id == id)
             return &threads[index];
     }
+
     return NULL;
 }
 
@@ -222,6 +224,7 @@ int psbridge_count_thread_waits(u32 type, int uid)
         if (thread->used > 0 && thread->wait.type == type && thread->wait.uid == uid)
             count++;
     }
+
     return count;
 }
 
@@ -281,6 +284,7 @@ int psbridge_create_thread(const char *name, void *entry, int priority, int stac
 
     if (stack_size < 0 || stack_size > THREAD_STACK_MAX)
         return -1;
+
     needed = ((u32)stack_size + THREAD_STACK_OVERHEAD + 15) & ~15u;
     if (needed < THREAD_STACK_MIN)
         needed = THREAD_STACK_MIN;
@@ -292,12 +296,14 @@ int psbridge_create_thread(const char *name, void *entry, int priority, int stac
 
         if (candidate->used)
             continue;
+
         if (!thread ||
             (candidate->stack_capacity >= capacity &&
              (thread->stack_capacity < capacity || candidate->stack_capacity < thread->stack_capacity)) ||
             (candidate->stack_capacity < capacity && candidate->stack_capacity > thread->stack_capacity))
             thread = candidate;
     }
+
     if (thread)
         thread->used = -1;
     if (interrupt_state)
@@ -312,6 +318,7 @@ int psbridge_create_thread(const char *name, void *entry, int priority, int stac
             thread->used = 0;
             return -1;
         }
+
         thread->stack_buffer = stack;
         thread->stack_capacity = capacity;
     }
@@ -663,6 +670,7 @@ int psbridge_change_thread_priority(int uid, int priority)
         return ChangeThreadPriority(GetThreadId(), priority);
     if (!thread)
         return -1;
+
     return ChangeThreadPriority(thread->thread_id, priority);
 }
 
@@ -687,6 +695,7 @@ int psbridge_refer_thread_status(int uid, void *output)
         return (int)0x80020198u;
     if (!data)
         return (int)0x800200d3u;
+
     size = *data;
     if (size > sizeof(info))
         return (int)0x800201bcu;
@@ -700,6 +709,7 @@ int psbridge_refer_thread_status(int uid, void *output)
     info.current_priority = host.current_priority;
     info.wakeup_count = host.wakeupCount;
     info.exit_status = (int)0x800201a4u;
+
     if (thread) {
         memcpy(info.name, thread->name, sizeof(info.name));
         info.attributes = thread->attributes;
@@ -728,6 +738,7 @@ void psbridge_exit_guest_thread(int status)
     int index;
     int caller = GetThreadId();
     (void)status;
+
     for (index = 0; index < THREAD_LIMIT; index++) {
         if (threads[index].used > 0 && threads[index].thread_id == caller) {
             static unsigned logs;
@@ -738,6 +749,7 @@ void psbridge_exit_guest_thread(int status)
             break;
         }
     }
+
     ExitDeleteThread();
 }
 
@@ -746,6 +758,7 @@ int psbridge_wakeup_guest_thread(int uid)
     PspThread *thread = find_thread(uid);
     if (!thread)
         return -1;
+
     return WakeupThread(thread->thread_id);
 }
 
@@ -757,21 +770,25 @@ int psbridge_delete_guest_thread(int uid, int terminate)
         return (int)0x80020198u;
     if (thread->thread_id == GetThreadId())
         return (int)0x80020197u;
+
     if (terminate) {
         ee_thread_status_t status;
 
         result = ReferThreadStatus(thread->thread_id, &status);
         if (result < 0)
             return result;
+
         if (status.status != THS_DORMANT) {
             result = TerminateThread(thread->thread_id);
             if (result < 0)
                 return result;
         }
     }
+
     result = DeleteThread(thread->thread_id);
     if (result < 0)
         return result;
+
     if (terminate)
         finish_guest_thread(uid, (int)0x800201acu);
     thread->used = 0;

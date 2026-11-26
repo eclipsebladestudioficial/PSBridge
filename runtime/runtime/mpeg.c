@@ -93,6 +93,7 @@ static void mpeg_key(char key[17], const u8 *block)
 
     for (i = 0; i < MPEG_PACKET_BYTES; ++i)
         hash = (hash ^ block[i]) * 1099511628211ull;
+
     snprintf(key, 17, "%08lx%08lx", (unsigned long)(hash >> 32), (unsigned long)(u32)hash);
 }
 
@@ -107,8 +108,10 @@ static int read_block(int file, void *output, u32 size)
             return -1;
         if (count == 0)
             break;
+
         total += count;
     }
+
     return total;
 }
 
@@ -135,6 +138,7 @@ static void find_movie(MpegContext *context, const u8 *packet)
         snprintf(context->key, sizeof(context->key), "%s-%s", context->header, key);
         return;
     }
+
     snprintf(path, sizeof(path), "host:converted/.video/p%s", key);
     file = open(path, O_RDONLY);
     if (file >= 0) {
@@ -161,6 +165,7 @@ static void reset_stream(MpegStream *stream)
             close_decoder();
         SignalSema(decoder_lock);
     }
+
     if (stream->file >= 0)
         close(stream->file);
 
@@ -187,6 +192,7 @@ static void update_ring(MpegContext *context)
             stream->consumed < consumed)
             consumed = stream->consumed;
     }
+
     ring[1] = context->packets;
     ring[2] = context->packets;
     ring[3] = context->packets - consumed;
@@ -199,6 +205,7 @@ static void reset_streams(MpegContext *context)
     for (i = 0; i < MPEG_STREAM_LIMIT; ++i)
         if (context->streams[i].registered)
             reset_stream(&context->streams[i]);
+
     context->packets = 0;
     update_ring(context);
 }
@@ -225,6 +232,7 @@ static boolean fill_picture_input(j_decompress_ptr jpeg)
     int bytes = read(decoder.file, input_buffer, sizeof(input_buffer));
     if (bytes <= 0)
         ERREXIT(jpeg, JERR_INPUT_EOF);
+
     jpeg->src->next_input_byte = input_buffer;
     jpeg->src->bytes_in_buffer = bytes;
     return TRUE;
@@ -234,10 +242,12 @@ static void skip_picture_input(j_decompress_ptr jpeg, long bytes)
 {
     if (bytes <= 0)
         return;
+
     while ((unsigned long)bytes > jpeg->src->bytes_in_buffer) {
         bytes -= jpeg->src->bytes_in_buffer;
         fill_picture_input(jpeg);
     }
+
     jpeg->src->next_input_byte += bytes;
     jpeg->src->bytes_in_buffer -= bytes;
 }
@@ -272,6 +282,7 @@ static u16 video_pixel16(u32 pixel, u32 format)
         return ((pixel >> 3) & 0x001f) | ((pixel >> 5) & 0x07e0) | ((pixel >> 8) & 0xf800);
     if (format == 1)
         return ((pixel >> 3) & 0x001f) | ((pixel >> 6) & 0x03e0) | ((pixel >> 9) & 0x7c00) | 0x8000;
+
     return ((pixel >> 4) & 0x000f) | ((pixel >> 8) & 0x00f0) | ((pixel >> 12) & 0x0f00) | 0xf000;
 }
 
@@ -294,21 +305,25 @@ static int decode_picture(const MpegContext *context, MpegStream *stream, void *
             close_decoder();
             return 0;
         }
+
         jpeg->out_color_space = JCS_EXT_RGBA;
         jpeg->dct_method = JDCT_IFAST;
         jpeg->do_fancy_upsampling = FALSE;
         jpeg_start_decompress(jpeg);
+
         for (y = 0; y < stream->height; ++y) {
             JSAMPROW row = (JSAMPROW)picture_row;
             if (decoder.decoded == stream->frames && context->pixel_format == 3)
                 row = (JSAMPROW)((u32 *)output + y * stride);
             jpeg_read_scanlines(jpeg, &row, 1);
+
             if (decoder.decoded == stream->frames && context->pixel_format != 3) {
                 u16 *pixels = (u16 *)output + y * stride;
                 for (x = 0; x < stream->width; ++x)
                     pixels[x] = video_pixel16(picture_row[x], context->pixel_format);
             }
         }
+
         jpeg_finish_decompress(jpeg);
         ++decoder.decoded;
     } while (decoder.decoded <= stream->frames);
@@ -321,6 +336,7 @@ static MpegStream *registered_stream(MpegContext *context, u32 id)
 {
     if (!context || !id || id > MPEG_STREAM_LIMIT || !context->streams[id - 1].registered)
         return NULL;
+
     return &context->streams[id - 1];
 }
 
@@ -333,6 +349,7 @@ static MpegStream *pending_stream(MpegContext *context, u32 au_address, int audi
             stream->au_address == au_address)
             return stream;
     }
+
     return NULL;
 }
 
@@ -340,9 +357,11 @@ static int open_stream(MpegContext *context, MpegStream *stream, int audio)
 {
     if (stream->file >= 0)
         return 1;
+
     stream->file = open_track(context, audio ? 'a' : 'v', stream->channel, audio ? "pcm" : "pts");
     if (stream->file < 0)
         return 0;
+
     if (audio) {
         off_t end = lseek(stream->file, 0, SEEK_END);
         if (end > 8 && lseek(stream->file, 0, SEEK_SET) == 0 &&
@@ -359,6 +378,7 @@ static int open_stream(MpegContext *context, MpegStream *stream, int audio)
             return 1;
         }
     }
+
     close(stream->file);
     stream->file = -1;
     return 0;
@@ -379,11 +399,13 @@ static u32 get_access_unit(MpegContext *context, MpegStream *stream, u32 address
         update_ring(context);
         return MPEG_NO_DATA;
     }
+
     if (audio) {
         if (!stream->audio_bytes) {
             au[2] = au[3] = (u32)-1;
             return MPEG_NO_DATA;
         }
+
         pts = stream->audio_pts + ((u64)stream->frames * 2048 * 90000) / 44100;
     } else {
         if (!stream->timestamp.packet &&
@@ -395,16 +417,20 @@ static u32 get_access_unit(MpegContext *context, MpegStream *stream, u32 address
         }
         if (context->packets < stream->timestamp.packet)
             return MPEG_NO_DATA;
+
         pts = ((u64)stream->timestamp.pts_high << 32) | stream->timestamp.pts_low;
     }
+
     au[0] = pts >> 32;
     au[1] = (u32)pts;
+
     u64 dts = audio ? pts : pts - 3003;
     au[2] = dts >> 32;
     au[3] = (u32)dts;
     au[5] = audio ? 2112 : MPEG_PACKET_BYTES;
     if (attr)
         *attr = audio ? 0 : 1;
+
     stream->au_address = address;
     stream->pending = 1;
     return 0;
@@ -415,18 +441,23 @@ static u32 decode_audio(MpegContext *context, u32 au_address, u32 output)
     u8 *pcm = psbridge_guest_buffer(output, MPEG_PCM_BYTES);
     if (!context || !pcm)
         return MPEG_INVALID_VALUE;
+
     MpegStream *stream = pending_stream(context, au_address, 1);
     if (!stream)
         return MPEG_NO_DATA;
+
     int bytes = read_block(stream->file, pcm, MPEG_PCM_BYTES);
     stream->pending = 0;
+
     if (bytes <= 0) {
         stream->audio_bytes = 0;
         return MPEG_NO_DATA;
     }
+
     stream->audio_bytes -= bytes;
     memset(pcm + bytes, 0, MPEG_PCM_BYTES - bytes);
     ++stream->frames;
+
     return 0;
 }
 
@@ -436,16 +467,19 @@ static u32 decode_video(MpegContext *context, u32 au_address, u32 stride, u32 bu
     u32 *status = psbridge_guest_buffer(status_address, 4);
     if (!context || !buffer || !status || decoder_lock < 0)
         return MPEG_INVALID_VALUE;
+
     *status = 0;
     context->frame_ready = 0;
 
     MpegStream *stream = pending_stream(context, au_address, 0);
     if (!stream)
         return MPEG_NO_DATA;
+
     if (!stride)
         stride = context->stride;
     if (stride < stream->width || stride > 2048)
         return MPEG_INVALID_VALUE;
+
     u32 pixels = (stream->height - 1) * stride + stream->width;
     void *output = psbridge_guest_buffer(*buffer, pixels * (context->pixel_format == 3 ? 4 : 2));
     if (!output)
@@ -461,10 +495,12 @@ static u32 decode_video(MpegContext *context, u32 au_address, u32 stride, u32 bu
         *status = 1;
     }
     SignalSema(decoder_lock);
+
     stream->pending = 0;
     stream->consumed = stream->timestamp.packet - 1;
     stream->timestamp.packet = 0;
     update_ring(context);
+
     context->result = *status ? 0 : MPEG_NO_DATA;
     return context->result;
 }
@@ -478,6 +514,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             u32 *ring = psbridge_game_pointer((void *)(uintptr_t)a0);
             if (!ring || a1 > 8192u || a1 * 2152u > a3)
                 return (u32)-1;
+
             memset(ring, 0, 48);
             ring[0] = a1;
             ring[4] = 2048;
@@ -502,12 +539,14 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             MpegContext *context = mpeg_context(a0);
             if (!context)
                 return MPEG_INVALID_VALUE;
+
             if (nid == 0x707b7629)
                 reset_streams(context);
             else if (nid == 0x500f0429) {
                 MpegStream *stream = registered_stream(context, a1);
                 if (!stream)
                     return MPEG_INVALID_VALUE;
+
                 reset_stream(stream);
             } else if (decoder_lock >= 0) {
                 WaitSema(decoder_lock);
@@ -516,6 +555,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
                         close_decoder();
                 SignalSema(decoder_lock);
             }
+
             return 0;
         }
         case 0xc132e22f:
@@ -526,6 +566,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             MpegContext *context;
             if (!handle || a2 < 0x10000 || (!ring && a3) || !psbridge_guest_buffer(a1, a2))
                 return MPEG_INVALID_VALUE;
+
             context = psbridge_guest_buffer(a1 + 0x30, sizeof(*context));
             memset(context, 0, sizeof(*context));
             memcpy(context->signature, "LIBMPEG\0" "001", sizeof(context->signature));
@@ -542,6 +583,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             MpegContext *context = mpeg_context(a0);
             if (!context)
                 return MPEG_INVALID_VALUE;
+
             reset_streams(context);
             memset(context, 0, sizeof(*context));
             return 0;
@@ -558,10 +600,12 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             u32 stream_size;
             if (!header || !result || memcmp(header, "PSMF", 4))
                 return (u32)-1;
+
             offset = big_endian_word(header + 8);
             stream_size = big_endian_word(header + 12);
             if (!offset || (offset & 2047u))
                 return (u32)-1;
+
             if (nid == 0x21ff80e4) {
                 MpegContext *context = mpeg_context(a0);
                 const u8 *full_header = psbridge_guest_buffer(a1, MPEG_PACKET_BYTES);
@@ -575,6 +619,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
                     }
                 }
             }
+
             *result = nid == 0x21ff80e4 ? offset : stream_size;
             return 0;
         }
@@ -582,13 +627,16 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             MpegContext *context = mpeg_context(a0);
             if (!context)
                 return MPEG_INVALID_VALUE;
+
             for (i = 0; i < MPEG_STREAM_LIMIT; ++i) {
                 MpegStream *stream = &context->streams[i];
                 if (stream->registered)
                     continue;
+
                 *stream = (MpegStream){ .type = a1, .channel = a2, .registered = 1, .file = -1 };
                 return i + 1;
             }
+
             return MPEG_INVALID_VALUE;
         }
         case 0x591a4aa2:
@@ -596,6 +644,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             MpegContext *context = mpeg_context(a0);
             if (!context || !a1 || a1 > MPEG_STREAM_LIMIT || !context->streams[a1 - 1].registered)
                 return MPEG_INVALID_VALUE;
+
             if (nid == 0x591a4aa2) {
                 reset_stream(&context->streams[a1 - 1]);
                 context->streams[a1 - 1].registered = 0;
@@ -603,24 +652,29 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
                 context->streams[a1 - 1].mode = a2;
             else
                 return MPEG_INVALID_VALUE;
+
             return 0;
         }
         case 0xa780cf7e: {
             MpegContext *context = mpeg_context(a0);
             if (!context)
                 return 0;
+
             for (i = 0; i < 2; ++i) {
                 if (context->es_buffers & (1u << i))
                     continue;
+
                 context->es_buffers |= 1u << i;
                 return i + 1;
             }
+
             return 0;
         }
         case 0xceb870b1: {
             MpegContext *context = mpeg_context(a0);
             if (!context || !a1 || a1 > 2)
                 return MPEG_INVALID_VALUE;
+
             context->es_buffers &= ~(1u << (a1 - 1));
             return 0;
         }
@@ -628,6 +682,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             u32 *ring = psbridge_game_pointer((void *)(uintptr_t)a0);
             if (!ring || !ring[0] || ring[0] > 8192u)
                 return (u32)-1;
+
             return ring[0] > ring[3] ? ring[0] - ring[3] : 0;
         }
         case 0xb240a59e: {
@@ -635,6 +690,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             int result;
             if (!ring || !ring[0] || ring[0] > 8192u || !ring[6])
                 return (u32)-1;
+
             u32 available = ring[0] > ring[3] ? ring[0] - ring[3] : 0;
             if (a1 > available)
                 a1 = available;
@@ -642,6 +698,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
                 a1 = a2;
             if (!a1)
                 return 0;
+
             u32 position = ring[2] % ring[0];
             if (a1 > ring[0] - position)
                 a1 = ring[0] - position;
@@ -651,6 +708,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
                 return result;
             if ((u32)result > a1)
                 result = (int)a1;
+
             MpegContext *context = mpeg_context(ring[10]);
             if (context && result > 0) {
                 if (!context->packets) {
@@ -658,10 +716,12 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
                     if (first)
                         find_movie(context, first);
                 }
+
                 if (context->packets <= 0xffffffffu - (u32)result)
                     context->packets += result;
                 update_ring(context);
             }
+
             return result;
         }
         case 0xe1ce83a7:
@@ -677,6 +737,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             u32 *status = psbridge_guest_buffer(a3, 4);
             if (!mpeg_context(a0) || !status)
                 return MPEG_INVALID_VALUE;
+
             *status = 0;
             return 0;
         }
@@ -685,6 +746,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             const s32 *mode = psbridge_guest_buffer(a1, 8);
             if (!context || !mode || mode[1] > 3 || mode[1] < -1)
                 return MPEG_INVALID_VALUE;
+
             if (mode[1] >= 0)
                 context->pixel_format = mode[1];
             return 0;
@@ -694,6 +756,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             u32 *detail = psbridge_guest_buffer(a1, 36);
             if (!context || !detail)
                 return MPEG_INVALID_VALUE;
+
             memset(detail, 0, 36);
             detail[0] = context->result;
             detail[1] = context->frames;
@@ -706,6 +769,7 @@ extern inline __attribute__((always_inline)) u64 psbridge_video_mpeg(u32 nid, u3
             u32 *au = psbridge_guest_buffer(a2, 24);
             if (!mpeg_context(a0) || !au)
                 return MPEG_INVALID_VALUE;
+
             au[0] = au[1] = au[2] = au[3] = (u32)-1;
             au[4] = a1;
             au[5] = 0;

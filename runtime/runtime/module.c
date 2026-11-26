@@ -78,6 +78,7 @@ static int register_module(const LibraryModule *library)
             break;
         }
     }
+
     if (uid == NO_MEMORY && free_index != MODULE_COUNT) {
         void *image = library ? psbridge_ram_pointer(library->address, library->image_size) : NULL;
 
@@ -87,12 +88,14 @@ static int register_module(const LibraryModule *library)
                 for (index = 0; index < library->export_count; index++)
                     *library->exports[index].binding = library->exports[index].target;
             }
+
             uid = next_uid++;
             modules[free_index].uid = uid;
             modules[free_index].library = library;
             modules[free_index].state = MODULE_LOADED;
         }
     }
+
     if (interrupts)
         EIntr();
     return uid;
@@ -111,11 +114,13 @@ static int load_library_module(int descriptor, s64 start)
     size = psbridge_file_seek(descriptor, 0, 0, SEEK_END);
     if (size < start)
         return FILE_ERROR;
+
     size -= start;
     for (index = 0; index < psp_module_count; index++) {
         if (psp_modules[index].file_size == size)
             break;
     }
+
     if (index == psp_module_count)
         return UNSUPPORTED_PRX;
     if (psbridge_file_seek(descriptor, (u32)start, (u64)start >> 32, SEEK_SET) != start)
@@ -126,8 +131,10 @@ static int load_library_module(int descriptor, s64 start)
 
         if (psbridge_file_read(descriptor, buffer, count) != (int)count)
             return FILE_ERROR;
+
         for (index = 0; index < count; index++)
             identity = (identity ^ buffer[index]) * 1099511628211ull;
+
         remaining -= count;
     }
 
@@ -135,6 +142,7 @@ static int load_library_module(int descriptor, s64 start)
         if (psp_modules[index].file_size == size && psp_modules[index].identity == identity)
             return register_module(&psp_modules[index]);
     }
+
     return UNSUPPORTED_PRX;
 }
 
@@ -144,6 +152,7 @@ static void unbind_library_module(const LibraryModule *library)
 
     if (!library)
         return;
+
     for (index = 0; index < library->export_count; index++) {
         const void **binding = library->exports[index].binding;
         const void *target = NULL;
@@ -156,6 +165,7 @@ static void unbind_library_module(const LibraryModule *library)
 
             if (modules[slot].state == MODULE_UNUSED || !other || modules[slot].uid <= uid)
                 continue;
+
             for (entry = 0; entry < other->export_count; entry++) {
                 if (other->exports[entry].binding == binding) {
                     uid = modules[slot].uid;
@@ -164,6 +174,7 @@ static void unbind_library_module(const LibraryModule *library)
                 }
             }
         }
+
         *binding = target;
     }
 }
@@ -180,6 +191,7 @@ int psbridge_load_firmware_module(int descriptor)
         return FILE_ERROR;
     if (!memcmp(header, "\177ELF", 4))
         return load_library_module(descriptor, start);
+
     if (!memcmp(header, "~SCE", 4)) {
         u32 offset = read_le32(header + 4);
 
@@ -188,8 +200,10 @@ int psbridge_load_firmware_module(int descriptor)
                                (u64)(start + offset) >> 32, SEEK_SET) < 0 ||
             psbridge_file_read(descriptor, header, sizeof(header)) != sizeof(header))
             return FILE_ERROR;
+
         start += offset;
     }
+
     if (memcmp(header, "~PSP", 4))
         return UNSUPPORTED_PRX;
 
@@ -202,6 +216,7 @@ int psbridge_load_firmware_module(int descriptor)
         if (!strncmp((const char *)header + 0x0a, resident_modules[index], 28))
             break;
     }
+
     if (index == sizeof(resident_modules) / sizeof(resident_modules[0]))
         return UNSUPPORTED_PRX;
 
@@ -244,11 +259,13 @@ extern inline __attribute__((always_inline)) int psbridge_change_firmware_module
                 result = uid;
             }
         }
+
         status = status_address ? psbridge_game_pointer((void *)status_address) : NULL;
         if (status && result >= 0)
             *status = 0;
         break;
     }
+
     if (interrupts)
         EIntr();
     return result;

@@ -77,6 +77,7 @@ static int verify_header_mac(const u8 *header, u32 length, const u8 *version,
     carry = subkey[0] >> 7;
     for (i = 0; i < AES_BLOCK - 1; i++)
         subkey[i] = (subkey[i] << 1) | (subkey[i + 1] >> 7);
+
     subkey[AES_BLOCK - 1] = (subkey[AES_BLOCK - 1] << 1) ^ (carry * 0x87);
 
     memcpy(message, header, length);

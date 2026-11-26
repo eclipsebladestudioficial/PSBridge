@@ -91,6 +91,7 @@ int psbridge_memory_init(void)
     memory_guard = CreateSema(&config);
     if (memory_guard < 0)
         return memory_guard;
+
     return 0;
 }
 
@@ -143,6 +144,7 @@ static int add_ram_entry(RamTlb *tlb, u32 address, u32 mask, u32 even, u32 odd)
             if ((entry->even != 1 && even != 1) ||
                 (entry->odd != 1 && odd != 1))
                 return -1;
+
             entry->even |= even;
             entry->odd |= odd;
             return 0;
@@ -225,9 +227,11 @@ int psbridge_map_game_memory(void)
     result = map_ee_mirror(&tlb, EE_UNCACHED_MIRROR, 0x17);
     if (result < 0)
         return result;
+
     result = map_ee_mirror(&tlb, EE_ACCELERATED_MIRROR, 0x3f);
     if (result < 0)
         return result;
+
     result = map_ee_mirror(&tlb, EE_GUEST_UNCACHED_MIRROR, 0x17);
     if (result < 0)
         return result;
@@ -262,6 +266,7 @@ int psbridge_map_game_memory(void)
         if (result < 0)
             return result;
     }
+
     for (i = tlb.count - 1; i >= 0; i--) {
         const RamTlbEntry *entry = &tlb.entries[i];
 
@@ -270,6 +275,7 @@ int psbridge_map_game_memory(void)
         if (result < 0)
             return result;
     }
+
     return 0;
 }
 
@@ -290,6 +296,7 @@ void *psbridge_ram_pointer(u32 address, u32 size)
         offset = canonical - psp_heap_base;
         if (offset >= psp_heap_size || size > psp_heap_size - offset)
             return NULL;
+
         physical = psp_heap_physical + offset;
     }
 
@@ -304,6 +311,7 @@ void *psbridge_guest_buffer(u32 address, u32 size)
         return (void *)(uintptr_t)address;
     if (physical >= 0x04000000 && physical < 0x04200000 && size <= 0x04200000 - physical)
         return (u8 *)psbridge_video_memory() + physical - 0x04000000;
+
     return psbridge_ram_pointer(address, size);
 }
 
@@ -369,9 +377,11 @@ static void *heap_alloc_tag(u32 size, u32 alignment, int high, u32 owner)
             position = align_up(cursor, alignment);
             if (position <= boundary && size <= boundary - position)
                 return heap_take(position, size, index, owner);
+
             if (index < (int)heap_count)
                 cursor = heap_allocations[index].start + heap_span(index);
         }
+
         return NULL;
     }
 
@@ -384,9 +394,11 @@ static void *heap_alloc_tag(u32 size, u32 alignment, int high, u32 owner)
             if (position >= boundary)
                 return heap_take(position, size, index, owner);
         }
+
         if (index > 0)
             cursor = heap_allocations[index - 1].start;
     }
+
     return NULL;
 }
 
@@ -422,11 +434,13 @@ static void *heap_alloc_at(void *requested, u32 size)
         else
             high = middle;
     }
+
     index = low;
     if (index && heap_allocations[index - 1].start + heap_span(index - 1) > start)
         return NULL;
     if (index < (int)heap_count && start + size > heap_allocations[index].start)
         return NULL;
+
     return heap_take(start, size, index, 0);
 }
 
@@ -444,6 +458,7 @@ static int heap_lookup(void *pointer)
     start = (u32)(address - base);
     low = 0;
     high = (int)heap_count;
+
     while (low < high) {
         int middle = low + (high - low) / 2;
         if (heap_allocations[middle].start < start)
@@ -451,8 +466,10 @@ static int heap_lookup(void *pointer)
         else
             high = middle;
     }
+
     if (low >= (int)heap_count || heap_allocations[low].start != start)
         return -1;
+
     return low;
 }
 
@@ -470,6 +487,7 @@ static int heap_free(void *pointer)
     int index = heap_lookup(pointer);
     if (index < 0)
         return -1;
+
     heap_drop(index);
     return 0;
 }
@@ -676,6 +694,7 @@ static int psbridge_allocate_fpl_raw(int uid, void **output)
             return 0;
         }
     }
+
     return -1;
 }
 
@@ -712,6 +731,7 @@ static int psbridge_create_vpl_raw(const char *name, int partition, u32 attribut
         if (!variable_pools[index].used)
             break;
     }
+
     if (index == VPL_LIMIT)
         return -1;
 
@@ -720,6 +740,7 @@ static int psbridge_create_vpl_raw(const char *name, int partition, u32 attribut
     variable_pools[index].uid = 0x2000 + index;
     variable_pools[index].size = size;
     variable_pools[index].attributes = attributes;
+
     if (name) {
         const char *source = psbridge_game_pointer(name);
         int i;
@@ -729,6 +750,7 @@ static int psbridge_create_vpl_raw(const char *name, int partition, u32 attribut
             variable_pools[index].name[i] = 0;
         }
     }
+
     {
         static int logs;
         if (logs++ < 12)
@@ -779,6 +801,7 @@ static int psbridge_allocate_vpl_raw(int uid, u32 size, void *output, int try_on
                 free_total -= span;
                 cursor = begin + span;
             }
+
             if (HEAP_SIZE > cursor && HEAP_SIZE - cursor > biggest)
                 biggest = HEAP_SIZE - cursor;
             if (logs++ < 16)
@@ -802,6 +825,7 @@ static int psbridge_allocate_vpl_raw(int uid, u32 size, void *output, int try_on
         }
         return 0;
     }
+
     {
         static int logs;
         if (logs++ < 12)
@@ -863,6 +887,7 @@ static int psbridge_free_vpl_raw(int uid, void *address)
             pool->count--;
         return 0;
     }
+
     return (int)0x8002019cu;
 }
 
@@ -890,6 +915,7 @@ static int psbridge_refer_vpl_status_raw(int uid, void *output)
         status.free_size = (s32)(pool->size >= pool->allocated ? pool->size - pool->allocated : 0);
         status.waiting_threads = 0;
         length = info->size;
+
         if (length < sizeof(u32) || length > sizeof(status)) {
             static u32 abnormal_sizes;
             if (++abnormal_sizes <= 8 || (abnormal_sizes & 1023u) == 0)
@@ -897,6 +923,7 @@ static int psbridge_refer_vpl_status_raw(int uid, void *output)
                     uid, length, abnormal_sizes);
             length = sizeof(status);
         }
+
         memcpy(info, &status, length);
 
         {
@@ -931,9 +958,11 @@ static int psbridge_delete_vpl_raw(int uid)
             if ((heap_allocations[n].size & 63u) == (u32)(index + 1))
                 heap_drop(n);
         }
+
         memset(pool, 0, sizeof(*pool));
         return 0;
     }
+
     return -1;
 }
 
@@ -943,6 +972,7 @@ int psbridge_volatile_lock(void *address, void *size)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_volatile_lock_raw(address, size);
     psbridge_memory_signal();
     return result;
@@ -953,6 +983,7 @@ int psbridge_volatile_unlock(void)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_volatile_unlock_raw();
     psbridge_memory_signal();
     return result;
@@ -963,6 +994,7 @@ int psbridge_alloc_partition(int partition, const char *name, int type, u32 size
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_alloc_partition_raw(partition, name, type, size, address);
     psbridge_memory_signal();
     return result;
@@ -973,6 +1005,7 @@ void * psbridge_block_address(int uid)
     void * result;
     if (psbridge_memory_wait() < 0)
         return NULL;
+
     result = psbridge_block_address_raw(uid);
     psbridge_memory_signal();
     return result;
@@ -983,6 +1016,7 @@ int psbridge_free_partition(int uid)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_free_partition_raw(uid);
     psbridge_memory_signal();
     return result;
@@ -993,6 +1027,7 @@ int psbridge_create_fpl(const char *name, int partition, u32 attributes, u32 blo
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_create_fpl_raw(name, partition, attributes, block_size, block_count, options);
     psbridge_memory_signal();
     return result;
@@ -1003,6 +1038,7 @@ int psbridge_allocate_fpl(int uid, void **output)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_allocate_fpl_raw(uid, output);
     psbridge_memory_signal();
     return result;
@@ -1013,6 +1049,7 @@ int psbridge_delete_fpl(int uid)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_delete_fpl_raw(uid);
     psbridge_memory_signal();
     return result;
@@ -1023,6 +1060,7 @@ int psbridge_create_vpl(const char *name, int partition, u32 attributes, u32 siz
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_create_vpl_raw(name, partition, attributes, size, options);
     psbridge_memory_signal();
     return result;
@@ -1033,6 +1071,7 @@ int psbridge_allocate_vpl(int uid, u32 size, void *output, int try_only)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_allocate_vpl_raw(uid, size, output, try_only);
     psbridge_memory_signal();
     return result;
@@ -1043,6 +1082,7 @@ int psbridge_free_vpl(int uid, void *address)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_free_vpl_raw(uid, address);
     psbridge_memory_signal();
     return result;
@@ -1053,6 +1093,7 @@ int psbridge_refer_vpl_status(int uid, void *output)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_refer_vpl_status_raw(uid, output);
     psbridge_memory_signal();
     return result;
@@ -1063,6 +1104,7 @@ int psbridge_delete_vpl(int uid)
     int result;
     if (psbridge_memory_wait() < 0)
         return -1;
+
     result = psbridge_delete_vpl_raw(uid);
     psbridge_memory_signal();
     return result;

@@ -113,6 +113,7 @@ static float vertex_component(const u8 *data, int offset, int format, int compon
         return (float)*(const s16 *)(data + offset + 2 * component);
     if (format == 3)
         return *(const float *)(data + offset + 4 * component);
+
     return 0.0f;
 }
 
@@ -124,6 +125,7 @@ static float vertex_weight(const u8 *data, int offset, int format, int component
         return (float)*(const u16 *)(data + offset + 2 * component) * (1.0f / 32768.0f);
     if (format == 3)
         return *(const float *)(data + offset + 4 * component);
+
     return 0.0f;
 }
 
@@ -135,6 +137,7 @@ static float vertex_texture(const u8 *data, int offset, int format, int componen
         return (float)*(const u16 *)(data + offset + 2 * component);
     if (format == 3)
         return *(const float *)(data + offset + 4 * component);
+
     return 0.0f;
 }
 
@@ -144,6 +147,7 @@ static u32 vertex_color(const u8 *data, int offset, int format)
         return unpack_color(*(const u16 *)(data + offset), format - 4);
     if (format == 7)
         return *(const u32 *)(data + offset);
+
     return 0xffffffffu;
 }
 
@@ -159,6 +163,7 @@ static u32 vertex_mix_color(const float values[4])
             component = 255.0f;
         output |= (u32)component << (8 * i);
     }
+
     return output;
 }
 
@@ -187,6 +192,7 @@ static u32 vertex_primary_color(u32 color, u32 material, u32 type)
             ((emissive >> shift) & 0xff);
         result |= (lit > 255 ? 255 : lit) << shift;
     }
+
     return result;
 }
 
