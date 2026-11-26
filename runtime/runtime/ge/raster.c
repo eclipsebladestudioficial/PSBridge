@@ -146,6 +146,40 @@ static int fast_sprite_target(
     return *right > *left && *bottom > *top;
 }
 
+static inline __attribute__((always_inline)) u32 blend_dxt_packed(
+    u32 source, u32 destination);
+
+static void blend_solid_sprite_5551(
+    u16 *pixels, int stride, int left, int top, int right, int bottom, u32 color)
+{
+    u16 channels[2][3][32];
+    u16 alpha[2];
+
+    for (unsigned a = 0; a < 2; a++) {
+        for (unsigned value = 0; value < 32; value++) {
+            u16 rgb = value | (value << 5) | (value << 10);
+            u32 destination = unpack_color_5551(rgb | (a << 15));
+            u16 blended = pack_color_5551(blend_color(color, destination));
+
+            channels[a][0][value] = blended & 0x001f;
+            channels[a][1][value] = blended & 0x03e0;
+            channels[a][2][value] = blended & 0x7c00;
+            alpha[a] = blended & 0x8000;
+        }
+    }
+
+    for (int y = top; y < bottom; y++) {
+        u16 *row = pixels + y * stride;
+        for (int x = left; x < right; x++) {
+            u16 pixel = row[x];
+            unsigned a = pixel >> 15;
+            row[x] = channels[a][0][pixel & 31] |
+                channels[a][1][(pixel >> 5) & 31] |
+                channels[a][2][(pixel >> 10) & 31] | alpha[a];
+        }
+    }
+}
+
 static int draw_solid_sprite(
     GeVertex second,
     int left,
@@ -166,8 +200,7 @@ static int draw_solid_sprite(
     if ((ge_state.command[GE_TEXTURE_ENABLE] & 1) && !(clear & 1))
         return 0;
 
-    if ((ge_state.command[GE_BLEND_ENABLE] & 1) && !(clear & 1))
-        return 0;
+    int blend = !(clear & 1) && (ge_state.command[GE_BLEND_ENABLE] & 1);
 
     format = ge_state.command[GE_FRAMEBUF_FORMAT] & 3;
 
@@ -192,13 +225,27 @@ static int draw_solid_sprite(
             return 1;
     }
 
+    if (blend && format == 1) {
+        blend_solid_sprite_5551(frame, width, left, top, right, bottom, second.color);
+        return 1;
+    }
+
     if (format == 3) {
         u32 color = second.color;
+        int source_alpha = !ge_blend_mode_seen || (ge_state.command[GE_BLENDMODE] & 0x7ff) == 0x32;
 
         for (y = top; y < bottom; y++) {
             u32 *row = (u32 *)frame + y * width + left;
 
-            if (write_color && write_alpha) {
+            if (blend) {
+                if (source_alpha) {
+                    for (x = left; x < right; x++, row++)
+                        *row = blend_dxt_packed(color, *row);
+                } else {
+                    for (x = left; x < right; x++, row++)
+                        *row = blend_color(color, *row);
+                }
+            } else if (write_color && write_alpha) {
                 for (x = left; x < right; x++)
                     *row++ = color;
             } else if (write_color) {
@@ -750,6 +797,9 @@ static int draw_rgba8888_sprite(
     return 1;
 }
 
+static int draw_indexed_sprite_5551(
+    GeVertex first, GeVertex second, int left, int top, int right, int bottom);
+
 static void draw_sprite(GeVertex first, GeVertex second)
 {
     if (first.x <= -99999.0f || first.y <= -99999.0f ||
@@ -773,16 +823,6 @@ static void draw_sprite(GeVertex first, GeVertex second)
 
     ge_hardware_cpu_write();
     clear_depth_sprite(second, left, top, right, bottom);
-    int u_start;
-    int v_start;
-    int texture_on;
-    int du;
-    int dv;
-    int u;
-    int v;
-    int x;
-    int y;
-    u32 color;
 
     if (right <= left || bottom <= top)
         return;
@@ -793,58 +833,34 @@ static void draw_sprite(GeVertex first, GeVertex second)
     if (draw_rgba5551_sprite(first, second, left, top, right, bottom))
         return;
 
+    if (draw_indexed_sprite_5551(first, second, left, top, right, bottom))
+        return;
+
     if (draw_clut4_sprite(first, second, left, top, right, bottom))
         return;
 
     if (draw_rgba8888_sprite(first, second, left, top, right, bottom))
         return;
 
-    texture_on = (ge_state.command[GE_TEXTURE_ENABLE] & 1) && !(ge_state.command[GE_CLEARMODE] & 1);
+    int texture_on = (ge_state.command[GE_TEXTURE_ENABLE] & 1) &&
+        !(ge_state.command[GE_CLEARMODE] & 1);
+    int du = (int)((second.u - first.u) * 65536.0f / (second.x - first.x));
+    int dv = (int)((second.v - first.v) * 65536.0f / (second.y - first.y));
+    int u_start = (int)(first.u * 65536.0f) + (int)((left - first.x) * du);
+    int v = (int)(first.v * 65536.0f) + (int)((top - first.y) * dv);
 
-    du = (int) (
-        (second.u - first.u) * 65536.0f /
-        (second.x - first.x)
-    );
+    for (int y = top; y < bottom; y++, v += dv) {
+        int u = u_start;
 
-    dv = (int) (
-        (second.v - first.v) * 65536.0f /
-        (second.y - first.y)
-    );
+        for (int x = left; x < right; x++, u += du) {
+            u32 color = second.color;
 
-    u_start = 
-        (int) (first.u * 65536.0f) +
-        (int) ((left - first.x) * du);
-
-    v_start = 
-        (int) (first.v * 65536.0f) +
-        (int) ((top - first.y) * dv);
-
-    v = v_start;
-
-    for (y = top; y < bottom; y++) {
-        u = u_start;
-
-        for (x = left; x < right; x++) {
-            color = second.color;
-
-            if (texture_on) {
+            if (texture_on)
                 color = shade_pixel(texture_pixel(u >> 16, v >> 16), color);
-            }
 
-
-        draw_pixel(x, y, color);
-        u += du;
-            
+            draw_pixel(x, y, color);
         }
-
-        v += dv;
-
-    
     }
-
-
-
-
 }
 
 static float edge(GeVertex a, GeVertex b, float x, float y)
@@ -929,9 +945,6 @@ typedef struct {
     int swizzled;
 } TriangleRgbaTexture;
 
-static inline __attribute__((always_inline)) u32 blend_dxt_packed(
-    u32 source, u32 destination);
-
 static int triangle_rgba_texture_setup(TriangleRgbaTexture *texture)
 {
     int buffer_width = texture_buffer_width(3);
@@ -981,6 +994,24 @@ static inline __attribute__((always_inline)) u32 raster_div255(u32 value)
     return (value + 1u + (value >> 8)) >> 8;
 }
 
+static inline __attribute__((always_inline)) u32 raster_div255_pair(u32 value)
+{
+    return ((value + 0x00010001u + ((value >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+}
+
+static inline __attribute__((always_inline)) u32 modulate_pixel(
+    u32 texture, u32 vertex, int use_alpha)
+{
+    u32 red = (texture & 255u) * (vertex & 255u);
+    u32 green = ((texture >> 8) & 255u) * ((vertex >> 8) & 255u);
+    u32 blue = ((texture >> 16) & 255u) * ((vertex >> 16) & 255u);
+    u32 rb = raster_div255_pair(red | (blue << 16));
+    u32 ga = use_alpha ?
+        raster_div255_pair(green | (((texture >> 24) * (vertex >> 24)) << 16)) << 8 :
+        (raster_div255(green) << 8) | (vertex & 0xff000000u);
+    return rb | ga;
+}
+
 static inline __attribute__((always_inline)) u32 shade_pixel_cached(
     u32 texture, u32 vertex, int function, int use_alpha, u32 environment)
 {
@@ -989,6 +1020,9 @@ static inline __attribute__((always_inline)) u32 shade_pixel_cached(
     u32 output_alpha = vertex_alpha;
     u32 result = 0;
     int channel;
+
+    if (function != 1 && function != 2 && function != 3 && function != 4)
+        return modulate_pixel(texture, vertex, use_alpha);
 
     if (function == 3)
         output_alpha = use_alpha ? texture_alpha : vertex_alpha;
@@ -1009,12 +1043,10 @@ static inline __attribute__((always_inline)) u32 shade_pixel_cached(
             color = raster_div255(v * (255 - t) + e * t);
         else if (function == 3)
             color = t;
-        else if (function == 4) {
+        else {
             color = v + t;
             if (color > 255)
                 color = 255;
-        } else {
-            color = raster_div255(v * t);
         }
 
         result |= color << shift;
@@ -1141,7 +1173,7 @@ static inline __attribute__((always_inline)) u32 blend_fixed_destination(
         rb += 0x00fe00feu;
         green += 254;
     }
-    rb = ((rb + 0x00010001u + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+    rb = raster_div255_pair(rb);
     u32 contribution = rb | (raster_div255(green) << 8);
     u32 result;
     if (subtract)
@@ -1342,6 +1374,20 @@ static inline __attribute__((always_inline)) u32 blend_dxt_packed(u32 source, u3
     return rb | (green << 8) | (output_alpha << 24);
 }
 
+static inline __attribute__((always_inline)) u16 blend_source_5551(u32 source, u16 pixel)
+{
+    u32 alpha = source >> 24;
+    u32 inverse = 255u - alpha;
+    u32 destination = unpack_color_5551(pixel);
+    u32 rb = (source & 0x00ff00ffu) * alpha +
+        (destination & 0x00ff00ffu) * inverse;
+    u32 green = ((source >> 8) & 255u) * alpha +
+        ((destination >> 8) & 255u) * inverse;
+    u32 rgb = raster_div255_pair(rb) | (raster_div255(green) << 8);
+
+    return pack_color_5551(rgb) | (pixel & 0x8000u) | ((alpha & 0x80u) << 8);
+}
+
 typedef struct {
     u32 revision;
     u32 clut_format;
@@ -1404,6 +1450,102 @@ static const u32 *triangle_5551_span_colors(
     }
 
     return colors;
+}
+
+static inline int sprite_texture_coordinate(u32 position, int last, int clamp)
+{
+    int coordinate = (s32)position >> 16;
+    if (!clamp)
+        return coordinate & last;
+
+    return coordinate < 0 ? 0 : coordinate > last ? last : coordinate;
+}
+
+static inline unsigned indexed_sprite_column(
+    u32 position, int last, int clamp, int index4, int swizzled)
+{
+    int x = sprite_texture_coordinate(position, last, clamp);
+    unsigned offset = x >> index4;
+    if (swizzled)
+        offset = ((offset >> 4) << 7) + (offset & 15);
+
+    return (offset << 3) | ((x & index4) << 2);
+}
+
+static int draw_indexed_sprite_5551(
+    GeVertex first, GeVertex second, int left, int top, int right, int bottom)
+{
+    TrianglePalette texture;
+    int blend = ge_state.command[GE_BLEND_ENABLE] & 1;
+    void *frame;
+    int stride;
+
+    if ((ge_state.command[GE_FRAMEBUF_FORMAT] & 3) != 1 ||
+        !(ge_state.command[GE_TEXTURE_ENABLE] & 1) ||
+        (ge_state.command[GE_CLEARMODE] & 1) ||
+        (blend && ge_blend_mode_seen && (ge_state.command[GE_BLENDMODE] & 0x7ff) != 0x32) ||
+        !palette_revision() ||
+        !triangle_indexed_texture_layout(&texture))
+        return 0;
+
+    int draw_left = left;
+    int draw_top = top;
+
+    if (!fast_sprite_target(&draw_left, &draw_top, &right, &bottom, &frame, &stride))
+        return 1;
+
+    u32 alpha = ge_state.command[GE_ALPHATEST];
+    TriangleTarget target = {
+        .alpha_test = ge_state.command[GE_ALPHA_TEST_ENABLE] & 1,
+        .alpha_function = alpha & 7,
+        .alpha_mask = (alpha >> 16) & 0xff,
+        .alpha_reference = (alpha >> 8) & (alpha >> 16) & 0xff,
+        .blend = blend
+    };
+    const u32 *colors = triangle_5551_span_colors(
+        &texture, &target, 1, second.color,
+        ge_state.command[GE_TEXFUNC], ge_state.command[GE_TEXENVCOLOR]);
+
+    int du = (int)((second.u - first.u) * 65536.0f / (second.x - first.x));
+    int dv = (int)((second.v - first.v) * 65536.0f / (second.y - first.y));
+    u32 u_start = (u32)(int)(first.u * 65536.0f) + (int)((left - first.x) * du);
+    u32 v = (u32)(int)(first.v * 65536.0f) + (int)((top - first.y) * dv);
+    u_start += (u32)(draw_left - left) * du;
+    v += (u32)(draw_top - top) * dv;
+
+    int index4 = texture.format == 4;
+    unsigned index_mask = index4 ? 15u : 255u;
+    int max_x = texture.texture_width - 1;
+    int max_y = texture.texture_height - 1;
+    int width = right - draw_left;
+    unsigned columns[32];
+    int cached_columns = width <= (int)(sizeof(columns) / sizeof(columns[0]));
+
+    if (cached_columns)
+        for (int x = 0; x < width; x++)
+            columns[x] = indexed_sprite_column(u_start + (u32)x * du, max_x,
+                texture.clamp_x, index4, texture.swizzled);
+
+    for (int y = draw_top; y < bottom; y++, v += dv) {
+        int ty = sprite_texture_coordinate(v, max_y, texture.clamp_y);
+        const u8 *row = texture.texture +
+            pixel_offset(0, ty, texture.row_bytes, 1, texture.swizzled);
+        u16 *destination = (u16 *)frame + y * stride + draw_left;
+        u32 u = u_start;
+
+        for (int x = 0; x < width; x++, u += du, destination++) {
+            unsigned column = cached_columns ? columns[x] : indexed_sprite_column(
+                u, max_x, texture.clamp_x, index4, texture.swizzled);
+            unsigned index = (row[column >> 3] >> (column & 7)) & index_mask;
+            u32 color = colors[index];
+            if (color >> 24 == 255)
+                *destination = (u16)color;
+            else if (color)
+                *destination = blend_source_5551(color, *destination);
+        }
+    }
+
+    return 1;
 }
 
 static inline u64 repeat_pixel_5551(u16 pixel)
@@ -1660,6 +1802,54 @@ static int draw_right_triangle_5551(
     return 1;
 }
 
+typedef struct {
+    float wa;
+    float wb;
+    float alpha;
+    float u;
+    float v;
+    float q;
+    float z;
+} TriangleInterpolants;
+
+static inline __attribute__((always_inline)) void draw_indexed_5551_span(
+    const TrianglePalette *texture, u16 *frame, u16 *depth, int length,
+    TriangleInterpolants pixel, TriangleInterpolants step,
+    u32 alpha_min_product, int fixed_q, float inverse_q)
+{
+    for (int x = 0; x < length; ++x) {
+        float wc = 1.0f - pixel.wa - pixel.wb;
+        if (pixel.wa >= 0.0f && pixel.wb >= 0.0f && wc >= 0.0f) {
+            u16 z = triangle_depth_value(pixel.z);
+            if (z >= depth[x]) {
+                u32 texel = 0xffffffffu;
+                if (pixel.q != 0.0f) {
+                    float invq = fixed_q ? inverse_q : 1.0f / pixel.q;
+                    texel = triangle_indexed_texture_pixel(
+                        texture, (int)(pixel.u * invq), (int)(pixel.v * invq));
+                }
+
+                u32 product = (texel >> 24) * (u8)(int)pixel.alpha;
+                if (product >= alpha_min_product) {
+                    u32 alpha = raster_div255(product);
+                    u32 color = (texel & 0xffffffu) | (alpha << 24);
+                    frame[x] = alpha == 255 ? pack_color_5551(color) :
+                        blend_source_5551(color, frame[x]);
+                    depth[x] = z;
+                }
+            }
+        }
+
+        pixel.wa += step.wa;
+        pixel.wb += step.wb;
+        pixel.alpha += step.alpha;
+        pixel.u += step.u;
+        pixel.v += step.v;
+        pixel.q += step.q;
+        pixel.z += step.z;
+    }
+}
+
 static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
 {
     TrianglePalette fast;
@@ -1797,7 +1987,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     if (right < left || bottom < top)
         return;
 
-    if (ge_hardware_triangle(a, b, c, left, top, right + 1, bottom + 1))
+    if (ge_hardware_triangle(&a, &b, &c, left, top, right + 1, bottom + 1))
         return;
 
     ge_hardware_cpu_write();
@@ -2070,6 +2260,16 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     }
 
     fast_indexed = textured && triangle_indexed_texture_setup(&fast);
+    int white_indexed_5551 = fast_indexed && fast_5551 && target.depth &&
+        target.depth_test && target.depth_function == 7 && target.depth_write &&
+        target.blend && target.blend_source_alpha && target.alpha_test &&
+        target.alpha_function == 6 && target.alpha_mask == 255 &&
+        texfunc == 0 && tex_use_alpha &&
+        (a.color & b.color & c.color & 0xffffffu) == 0xffffffu;
+    int fixed_q = white_indexed_5551 && a.inv_w == b.inv_w && b.inv_w == c.inv_w &&
+        a.inv_w != 0.0f && isfinite(a.inv_w);
+    float inverse_q = fixed_q ? 1.0f / a.inv_w : 0.0f;
+    u32 alpha_min_product = (target.alpha_reference + 1) * 255u;
 
     red_row = cr + wa_row * (ar - cr) + wb_row * (br - cr);
     green_row = cg + wa_row * (ag - cg) + wb_row * (bg - cg);
@@ -2134,6 +2334,15 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         target_frame_5551_row = fast_5551 ? (u16 *)target.frame + y * target.width : NULL;
         target_depth_row = (fast_target || fast_5551) && target.depth ?
             target.depth + y * target.depth_width : NULL;
+
+        if (white_indexed_5551 && xstart <= xend) {
+            TriangleInterpolants pixel = { wa, wb, alpha, u, v, q, z };
+            TriangleInterpolants step = { wa_dx, wb_dx, alpha_dx, u_dx, v_dx, q_dx, z_dx };
+            draw_indexed_5551_span(&fast, target_frame_5551_row + xstart,
+                target_depth_row + xstart, xend - xstart + 1, pixel, step,
+                alpha_min_product, fixed_q, inverse_q);
+            goto next_row;
+        }
 
         for (x = xstart; x <= xend; x++) {
             float wc = 1.0f - wa - wb;
@@ -2201,6 +2410,7 @@ next_pixel:
             z += z_dx;
         }
 
+next_row:
         wa_row += wa_dy;
         wb_row += wb_dy;
         red_row += red_dy;
@@ -2214,20 +2424,19 @@ next_pixel:
     }
 }
 
-static float clip_distance(GeVertex v, int plane)
+static unsigned clip_mask(const GeVertex *vertex)
 {
-    if (plane == 0)
-        return v.clip_x + v.clip_w;
-    if (plane == 1)
-        return v.clip_w - v.clip_x;
-    if (plane == 2)
-        return v.clip_y + v.clip_w;
-    if (plane == 3)
-        return v.clip_w - v.clip_y;
-    if (plane == 4)
-        return v.clip_z + v.clip_w;
+    float x = vertex->clip_x;
+    float y = vertex->clip_y;
+    float z = vertex->clip_z;
+    float w = vertex->clip_w;
 
-    return v.clip_w - v.clip_z;
+    return (unsigned)(x + w < 0.0f) |
+        ((unsigned)(w - x < 0.0f) << 1) |
+        ((unsigned)(y + w < 0.0f) << 2) |
+        ((unsigned)(w - y < 0.0f) << 3) |
+        ((unsigned)(z + w < 0.0f) << 4) |
+        ((unsigned)(w - z < 0.0f) << 5);
 }
 
 static GeVertex clip_vertex(GeVertex a, GeVertex b, float t)
@@ -2277,19 +2486,16 @@ static int ge3d_outside_screen(GeVertex v, const u32 *commands)
     float x = v.x + (float)(commands[GE_OFFSETX] & 0xffffu) * (1.0f / 16.0f);
     float y = v.y + (float)(commands[GE_OFFSETY] & 0xffffu) * (1.0f / 16.0f);
 
-    return !isfinite(x) || !isfinite(y) || x < 0.0f || y < 0.0f ||
-        x >= 4096.0f || y >= 4096.0f;
+    return fabsf(v.clip_w) < 0.0000001f ||
+        !(x >= 0.0f && x < 4096.0f && y >= 0.0f && y < 4096.0f);
 }
 
 static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, int flip)
 {
     GeVertex polygon[5];
-    GeVertex clipped[5];
     int count = 3;
     int clipping_enabled = ge_state.command[0x1c] & 1u;
-    int plane;
     int i;
-    int outside_near = 0;
 
     if (type & (1u << 23)) {
         ge3d_emit_triangle(a, b, c, type, flip);
@@ -2302,64 +2508,48 @@ static void draw_clipped_triangle(GeVertex a, GeVertex b, GeVertex c, u32 type, 
         return;
     }
 
-    for (plane = 0; plane < 6; plane++) {
-        if (clip_distance(a, plane) < 0.0f &&
-            clip_distance(b, plane) < 0.0f &&
-            clip_distance(c, plane) < 0.0f) {
-            return;
-        }
-    }
-
-    if (!clipping_enabled && (a.clip_w <= 0.0f || b.clip_w <= 0.0f || c.clip_w <= 0.0f)) {
+    unsigned clip_a = clip_mask(&a);
+    unsigned clip_b = clip_mask(&b);
+    unsigned clip_c = clip_mask(&c);
+    if (clip_a & clip_b & clip_c)
         return;
-    }
 
-    polygon[0] = a;
-    polygon[1] = b;
-    polygon[2] = c;
+    if (!clipping_enabled && (a.clip_w <= 0.0f || b.clip_w <= 0.0f || c.clip_w <= 0.0f))
+        return;
 
-    if (clip_distance(a, 4) < 0.0f)
-        outside_near++;
-    if (clip_distance(b, 4) < 0.0f)
-        outside_near++;
-    if (clip_distance(c, 4) < 0.0f)
-        outside_near++;
-
-    if (clipping_enabled && outside_near) {
-        int output_count = 0;
-        GeVertex previous = polygon[2];
-        float previous_distance = clip_distance(previous, 4);
+    if (clipping_enabled && ((clip_a | clip_b | clip_c) & (1u << 4))) {
+        GeVertex input[] = {a, b, c};
+        GeVertex previous = c;
+        float previous_distance = c.clip_z + c.clip_w;
         int previous_inside = previous_distance >= 0.0f;
 
+        count = 0;
         for (i = 0; i < 3; i++) {
-            GeVertex current = polygon[i];
-            float current_distance = clip_distance(current, 4);
+            GeVertex current = input[i];
+            float current_distance = current.clip_z + current.clip_w;
             int current_inside = current_distance >= 0.0f;
 
             if (current_inside != previous_inside) {
                 float t = previous_distance / (previous_distance - current_distance);
-                clipped[output_count++] = clip_vertex(previous, current, t);
+                GeVertex clipped = clip_vertex(previous, current, t);
+                if (!ge3d_project_vertex(&clipped, ge_state.command))
+                    return;
+                polygon[count++] = clipped;
             }
             if (current_inside)
-                clipped[output_count++] = current;
+                polygon[count++] = current;
 
             previous = current;
             previous_distance = current_distance;
             previous_inside = current_inside;
         }
-
-        count = output_count;
-        for (i = 0; i < count; i++)
-            polygon[i] = clipped[i];
+    } else {
+        polygon[0] = a;
+        polygon[1] = b;
+        polygon[2] = c;
     }
 
-    if (!count)
-        return;
-
     for (i = 0; i < count; i++) {
-        if (!ge3d_project_vertex(&polygon[i], ge_state.command)) {
-            return;
-        }
         if (ge3d_outside_screen(polygon[i], ge_state.command)) {
             return;
         }

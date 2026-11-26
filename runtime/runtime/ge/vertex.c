@@ -196,6 +196,44 @@ static u32 vertex_primary_color(u32 color, u32 material, u32 type)
     return result;
 }
 
+static GeVertex read_single_vertex(const u8 *data, u32 type, VertexLayout layout,
+    u32 material)
+{
+    int texture = type & 3;
+    int color = (type >> 2) & 7;
+    int position = (type >> 7) & 3;
+    int weight_type = (type >> 9) & 3;
+    int weight_count = weight_type ? ((type >> 14) & 7) + 1 : 0;
+    float weights[8];
+    GeVertex vertex;
+
+    vertex.x = 0.0f + vertex_component(data, layout.position, position, 0);
+    vertex.y = 0.0f + vertex_component(data, layout.position, position, 1);
+    if (position == 2 && (type & (1u << 23)))
+        vertex.z = (float)*(const u16 *)(data + layout.position + 4);
+    else
+        vertex.z = 0.0f + vertex_component(data, layout.position, position, 2);
+
+    if (texture) {
+        vertex.u = 0.0f + vertex_texture(data, layout.texture, texture, 0);
+        vertex.v = 0.0f + vertex_texture(data, layout.texture, texture, 1);
+        ge_state.texture_u = vertex.u;
+        ge_state.texture_v = vertex.v;
+    } else {
+        vertex.u = ge_state.texture_u;
+        vertex.v = ge_state.texture_v;
+    }
+
+    u32 primary_color = color ? vertex_color(data, layout.color, color) : material;
+    vertex.color = vertex_primary_color(primary_color, material, type);
+    vertex.inv_w = 0.0f;
+    for (int i = 0; i < weight_count; i++)
+        weights[i] = vertex_weight(data, layout.weight, weight_type, i);
+
+    ge3d_transform_vertex(&vertex, type, ge_state.command, weights, weight_count);
+    return vertex;
+}
+
 GeVertex read_vertex(int number, u32 type, VertexLayout layout)
 {
     int texture = type & 3;
@@ -217,18 +255,19 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
     int target;
     int i;
 
-    memset(&vertex, 0, sizeof(vertex));
     u32 material = ge_state.command[GE_MATERIALAMBIENT] |
         ((ge_state.command[GE_MATERIALALPHA] & 0xff) << 24);
-    vertex.color = material;
-
-    if (!data || layout.stride <= 0 || layout.target_stride <= 0) {
-        return vertex;
-    }
+    if (!data || layout.stride <= 0 || layout.target_stride <= 0)
+        return (GeVertex){ .color = material };
 
     data += index * (u32)layout.stride;
     ge_hardware_read(data, layout.stride);
 
+    if (morph_count == 1)
+        return read_single_vertex(data, type, layout, material);
+
+    vertex.color = material;
+    vertex.inv_w = 0.0f;
     if (!texture) {
         uv_u = ge_state.texture_u;
         uv_v = ge_state.texture_v;
@@ -236,7 +275,7 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
 
     for (target = 0; target < morph_count; target++) {
         const u8 *morph_data = data + target * layout.target_stride;
-        float blend = morph_count == 1 ? 1.0f : ge3d_morph_weight(target);
+        float blend = ge3d_morph_weight(target);
         float px;
         float py;
         float pz;
