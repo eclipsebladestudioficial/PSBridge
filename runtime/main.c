@@ -38,7 +38,7 @@ int main(void)
     if (psbridge_map_game_memory() < 0)
         return -1;
 
-    if (psbridge_sync_init() < 0 || psbridge_memory_init() < 0) {
+    if (psbridge_sync_init() < 0 || psbridge_memory_init() < 0 || psbridge_graphics_init() < 0) {
         PSB_LOG(BOOT, "memoria nao conseguiu abrir a tranca da putaria");
         return -1;
     }

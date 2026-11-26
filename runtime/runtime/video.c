@@ -214,9 +214,6 @@ const void *psbridge_video_frame(int *stride, int *format)
     u32 display_vblank = current_vcount();
     u8 *vram = (u8 *)psbridge_video_memory();
     u32 visible_offset = (u32)((uintptr_t)source - (uintptr_t)vram);
-    const void *candidate = NULL;
-    u32 candidate_hash = 0;
-    u32 current_hash = 0;
 
     *format = framebuffer_format;
     *stride = 0;
@@ -232,29 +229,22 @@ const void *psbridge_video_frame(int *stride, int *format)
         return NULL;
 
     if (framebuffer_format == 3 && visible_offset <= 0x200000u - 0x88000u) {
-        current_hash = framebuffer_hash(source, width);
-        if (ge_offset <= 0x200000u - 0x88000u && ge_offset != visible_offset && ge_sequence) {
-            int known = 0;
-            int i;
-            for (i = 0; i < known_video_count; i++) {
+        u32 current_hash = framebuffer_hash(source, width);
+        int display_stale = display_vblank - last_display_vblank >= 12u;
+        if (display_stale && !auto_source_active && ge_sequence &&
+            ge_sequence != ge_frame_seq_seen && current_hash == frame_saved_hash &&
+            ge_offset <= 0x200000u - 0x88000u && ge_offset != visible_offset) {
+            for (int i = 0; i < known_video_count; i++) {
                 if (known_video_buffers[i] == ge_offset) {
-                    known = 1;
+                    if (framebuffer_hash(vram + ge_offset, PSP_BUFFER_WIDTH) != current_hash) {
+                        auto_source_active = 1;
+                        auto_source_offset = ge_offset;
+                    }
                     break;
                 }
             }
-            if (known) {
-                candidate = vram + ge_offset;
-                candidate_hash = framebuffer_hash(candidate, PSP_BUFFER_WIDTH);
-            }
         }
-        if (candidate && !auto_source_active && ge_sequence != ge_frame_seq_seen &&
-            current_hash == frame_saved_hash && candidate_hash != current_hash &&
-            display_vblank - last_display_vblank >= 12u) {
-            auto_source_active = 1;
-            auto_source_offset = ge_offset;
-        }
-        if (auto_source_active && auto_source_offset == ge_offset &&
-            display_vblank - last_display_vblank >= 12u) {
+        if (display_stale && auto_source_active && auto_source_offset == ge_offset) {
             source = vram + auto_source_offset;
             width = PSP_BUFFER_WIDTH;
         }
@@ -284,7 +274,9 @@ extern inline __attribute__((always_inline)) u64 psbridge_display(u32 nid, u32 a
     }
 
     if (nid == 0x0e20f177) {
+        psbridge_graphics_lock();
         psbridge_graphics_start();
+        psbridge_graphics_unlock();
         return 0;
     }
 

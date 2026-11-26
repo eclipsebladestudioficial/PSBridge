@@ -364,7 +364,7 @@ void draw_primitive(u32 argument);
 int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int right, int bottom);
 int ge_hardware_triangle(GeVertex a, GeVertex b, GeVertex c, int left, int top, int right, int bottom);
 void ge_hardware_flush(void);
-void ge_hardware_read(const void *source);
+void ge_hardware_read(const void *source, unsigned size);
 void ge_hardware_cpu_write(void);
 void ge_hardware_texture_dirty(void);
 

@@ -13,6 +13,7 @@
 #define TRANSFER_ROWS 8
 
 static GSGLOBAL *gs;
+static int graphics_sema;
 
 typedef struct {
     u64 data;
@@ -26,6 +27,23 @@ static u32 frame_count;
 static const void *gs_frame_source;
 static int gs_frame_format;
 static u32 gs_frame_hash;
+
+int psbridge_graphics_init(void)
+{
+    ee_sema_t config = { .max_count = 1, .init_count = 1 };
+    graphics_sema = CreateSema(&config);
+    return graphics_sema;
+}
+
+void psbridge_graphics_lock(void)
+{
+    WaitSema(graphics_sema);
+}
+
+void psbridge_graphics_unlock(void)
+{
+    SignalSema(graphics_sema);
+}
 
 int psbridge_graphics_start(void)
 {
@@ -73,19 +91,25 @@ int psbridge_graphics_start(void)
     return 0;
 }
 
-static u32 frame_hash(const u8 *source, int width, int bytes)
+static inline __attribute__((always_inline)) u32 hash_frame_samples(
+    const u8 *source, int stride, int bytes, int aligned)
 {
     u32 hash = 2166136261u;
 
     for (int y = 0; y < PSP_HEIGHT; y += 4) {
-        const u8 *row = source + y * width * bytes;
+        const u8 *row = source + y * stride * bytes;
         for (int x = (y >> 2) & 7; x < PSP_WIDTH; x += 8) {
+            const u8 *sample = row + x * bytes;
             u32 pixel;
             if (bytes == 4) {
-                memcpy(&pixel, row + x * sizeof(pixel), sizeof(pixel));
+                if (aligned)
+                    sample = __builtin_assume_aligned(sample, 4);
+                memcpy(&pixel, sample, sizeof(pixel));
             } else {
                 u16 pixel16;
-                memcpy(&pixel16, row + x * sizeof(pixel16), sizeof(pixel16));
+                if (aligned)
+                    sample = __builtin_assume_aligned(sample, 2);
+                memcpy(&pixel16, sample, sizeof(pixel16));
                 pixel = pixel16;
             }
             hash = (hash ^ pixel) * 16777619u;
@@ -93,6 +117,15 @@ static u32 frame_hash(const u8 *source, int width, int bytes)
     }
 
     return hash;
+}
+
+static u32 frame_hash(const u8 *source, int stride, int bytes)
+{
+    if (bytes == 4 && !((uintptr_t)source & 3))
+        return hash_frame_samples(source, stride, 4, 1);
+    if (bytes == 2 && !((uintptr_t)source & 1))
+        return hash_frame_samples(source, stride, 2, 1);
+    return hash_frame_samples(source, stride, bytes, 0);
 }
 
 static void send_gif(const void *data, unsigned bytes)
@@ -195,7 +228,7 @@ static void upload_frame(const u8 *source, int width, int format, int bytes, int
     }
 }
 
-void psbridge_graphics_present(void)
+static void present_frame(void)
 {
     static u32 previous_hash;
     static int previous_format = -1;
@@ -242,4 +275,11 @@ void psbridge_graphics_present(void)
     previous_hash = hash;
     previous_format = format;
     psbridge_video_log_frame(++frame_count);
+}
+
+void psbridge_graphics_present(void)
+{
+    psbridge_graphics_lock();
+    present_frame();
+    psbridge_graphics_unlock();
 }

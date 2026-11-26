@@ -86,18 +86,23 @@ VertexLayout vertex_layout(u32 type)
 static u32 vertex_index(int number, u32 type)
 {
     int index_type = (type >> 11) & 3;
-    const void *indices = ge_pointer(ge_state.index_address);
-
-    if (!index_type || !indices)
+    if (!index_type)
         return number;
 
+    const u8 *indices = ge_pointer(ge_state.index_address);
+    if (!indices)
+        return number;
+
+    unsigned index_size = 1u << (index_type - 1);
+    const u8 *entry = indices + (unsigned)number * index_size;
+    ge_hardware_read(entry, index_size);
     if (index_type == 1)
-        return ((const u8 *)indices)[number];
+        return *entry;
 
     if (index_type == 2)
-        return ((const u16 *)indices)[number];
+        return *(const u16 *)entry;
 
-    return ((const u32 *)indices)[number] & 0xffff;
+    return *(const u32 *)entry & 0xffff;
 }
 
 static float vertex_component(const u8 *data, int offset, int format, int component)
@@ -216,6 +221,7 @@ GeVertex read_vertex(int number, u32 type, VertexLayout layout)
     }
 
     data += index * (u32)layout.stride;
+    ge_hardware_read(data, layout.stride);
 
     if (!texture) {
         uv_u = ge_state.texture_u;

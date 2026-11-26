@@ -140,6 +140,11 @@ GeList *find_list(int id)
 void execute_list(GeList *list)
 {
     int commands = 0;
+    psbridge_graphics_lock();
+    if (list->done) {
+        psbridge_graphics_unlock();
+        return;
+    }
     ge_hardware_texture_dirty();
     ge_dxt_new_list();
 
@@ -164,7 +169,7 @@ void execute_list(GeList *list)
             break;
         }
 
-        ge_hardware_read(instruction);
+        ge_hardware_read(instruction, sizeof(*instruction));
         word = *instruction;
         command = word >> 24;
         argument = word & 0x00ffffff;
@@ -242,22 +247,26 @@ void execute_list(GeList *list)
                     ge_ready_sequence++;
                 }
             }
-            if (list->pending_signal) {
-                u32 signal = list->signal_id;
-                list->pending_signal = 0;
-                fire_ge_callback(list->callback_id, 0, signal);
-            }
-            if (list->pending_finish) {
-                u32 finish = list->finish_id;
-                list->pending_finish = 0;
-                fire_ge_callback(list->callback_id, 1, finish);
-            }
+            int callback = list->callback_id;
+            int pending_signal = list->pending_signal;
+            int pending_finish = list->pending_finish;
+            u32 signal = list->signal_id;
+            u32 finish = list->finish_id;
+            list->pending_signal = 0;
+            list->pending_finish = 0;
+            psbridge_graphics_unlock();
+            if (pending_signal)
+                fire_ge_callback(callback, 0, signal);
+            if (pending_finish)
+                fire_ge_callback(callback, 1, finish);
+            return;
         }
     }
     ge_hardware_flush();
     if (commands >= GE_COMMAND_LIMIT) {
         list->done = 1;
     }
+    psbridge_graphics_unlock();
 }
 
 int enqueue_list(u32 address, u32 stall, int callback_id)

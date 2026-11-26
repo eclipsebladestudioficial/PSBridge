@@ -14,6 +14,33 @@
 #define GS_GE_TEXTURE_BYTES (1024 * 1024)
 #define GS_GE_TEXTURE_ROWS 8
 
+extern u8 __psbridge_heap_start[];
+extern u8 __psbridge_heap_end[];
+
+typedef enum {
+    GE_GS_BLEND_NONE,
+    GE_GS_BLEND_ADD,
+    GE_GS_BLEND_REVERSE_SUBTRACT,
+    GE_GS_BLEND_SOURCE_ALPHA,
+} GeGsBlend;
+
+typedef enum {
+    GE_GS_TEXTURE_DECAL,
+    GE_GS_TEXTURE_MODULATE_RGB,
+    GE_GS_TEXTURE_MODULATE_RGBA,
+} GeGsTextureFunction;
+
+typedef enum {
+    GE_GS_STATE_FRAME,
+    GE_GS_STATE_ZBUF,
+    GE_GS_STATE_TEST,
+    GE_GS_STATE_SCISSOR,
+    GE_GS_STATE_TEXTURE,
+    GE_GS_STATE_CLAMP,
+    GE_GS_STATE_ALPHA,
+    GE_GS_STATE_COUNT,
+} GeGsDrawState;
+
 typedef struct {
     u64 data;
     u64 address;
@@ -30,6 +57,8 @@ typedef struct {
     int top;
     int bottom;
     unsigned count;
+    unsigned state_valid;
+    u64 state[GE_GS_STATE_COUNT];
 } GeHardwareBatch;
 
 typedef struct {
@@ -41,17 +70,29 @@ typedef struct {
     u32 function;
     u32 environment;
     u32 color;
+    GeGsBlend blend;
+    int binary_alpha_required;
+    GeGsTextureFunction texture_function;
+    int blend_alpha_ref;
 } GeHardwareTextureKey;
 
 typedef struct {
     GeHardwareTextureKey key;
     u64 tex0;
-    int binary_alpha;
 } GeHardwareTexture;
+
+typedef struct {
+    const u8 *pixels;
+    u32 layout;
+    u32 size;
+    u32 vram;
+} GeHardwareImage;
 
 static GeHardwareBatch batch;
 static GeHardwareTexture textures[16];
+static GeHardwareImage images[16];
 static unsigned texture_count;
+static unsigned image_count;
 static u32 texture_vram;
 static unsigned texture_used;
 static u32 decoded[GS_GE_STRIDE * GS_GE_TEXTURE_ROWS] __attribute__((aligned(64)));
@@ -165,6 +206,22 @@ static void gs_reg(u64 address, u64 data)
     packet[++batch.count] = (GeGifRegister){ data, address };
 }
 
+static int gs_state_changed(GeGsDrawState field, u64 data)
+{
+    unsigned bit = 1u << field;
+    if ((batch.state_valid & bit) && batch.state[field] == data)
+        return 0;
+    batch.state_valid |= bit;
+    batch.state[field] = data;
+    return 1;
+}
+
+static void gs_draw_reg(GeGsDrawState field, u64 address, u64 data)
+{
+    if (gs_state_changed(field, data))
+        gs_reg(address, data);
+}
+
 static int begin_draw(int top, int bottom, u8 *depth, int replace_color, int replace_depth)
 {
     int format = ge_state.command[GE_FRAMEBUF_FORMAT] & 3;
@@ -186,7 +243,8 @@ static int begin_draw(int top, int bottom, u8 *depth, int replace_color, int rep
             (depth_offset < offset + size && offset < depth_offset + depth_size))
             return 0;
         if (!depth_vram) {
-            u32 allocation = psbridge_graphics_alloc_texture(depth_size + 8191 + GS_GE_STRIDE * 16 * 2);
+            unsigned gs_depth_size = GS_GE_STRIDE * ((GS_GE_HEIGHT + 63) & ~63u) * 2;
+            u32 allocation = psbridge_graphics_alloc_texture(gs_depth_size + 8191);
             if (allocation == GSKIT_ALLOC_ERROR)
                 return 0;
             depth_vram = (allocation + 8191) & ~8191u;
@@ -194,7 +252,7 @@ static int begin_draw(int top, int bottom, u8 *depth, int replace_color, int rep
     }
 
     if (color != batch.color || format != batch.format ||
-        (depth && batch.depth && depth != batch.depth) || batch.count + 24 >= GS_GE_PACKET_SIZE)
+        (depth && batch.depth && depth != batch.depth) || batch.count + 40 >= GS_GE_PACKET_SIZE)
         ge_hardware_flush();
 
     if (!batch.count) {
@@ -213,6 +271,7 @@ static int begin_draw(int top, int bottom, u8 *depth, int replace_color, int rep
         gs_reg(GS_FBA_2, 0);
         gs_reg(GS_COLCLAMP, 1);
         gs_reg(GS_XYOFFSET_2, GS_SETREG_XYOFFSET(GS_GE_OFFSET, GS_GE_OFFSET));
+        gs_reg(GS_TEX1_2, GS_SETREG_TEX1(1, 0, 0, 0, 0, 0, 0));
     }
 
     if (depth && !batch.depth)
@@ -224,10 +283,20 @@ static int begin_draw(int top, int bottom, u8 *depth, int replace_color, int rep
     return 1;
 }
 
-void ge_hardware_read(const void *source)
+static int reads_batch_rows(const void *source, unsigned size, const u8 *target,
+    unsigned row_bytes)
 {
-    if (batch.count &&
-        (uintptr_t)source - (uintptr_t)psbridge_video_memory() < 0x200000)
+    uintptr_t start = (uintptr_t)target + batch.top * row_bytes;
+    uintptr_t read = (uintptr_t)source;
+    return read >= start ? read - start < (batch.bottom - batch.top) * row_bytes :
+        start - read < size;
+}
+
+void ge_hardware_read(const void *source, unsigned size)
+{
+    if (batch.count && source && size &&
+        (reads_batch_rows(source, size, batch.color, GS_GE_STRIDE * (batch.format == 3 ? 4 : 2)) ||
+         (batch.depth_written && reads_batch_rows(source, size, batch.depth, GS_GE_STRIDE * 2))))
         ge_hardware_flush();
 }
 
@@ -243,9 +312,73 @@ void ge_hardware_texture_dirty(void)
         ge_hardware_flush();
     texture_used = 0;
     texture_count = 0;
+    image_count = 0;
 }
 
-static const GeHardwareTexture *load_texture(u32 vertex_color)
+static const u8 *texture_source(u32 address, unsigned size)
+{
+    const u8 *pixels = psbridge_ram_pointer(address, size);
+    if (pixels)
+        return pixels;
+
+    uintptr_t start = (uintptr_t)__psbridge_heap_start & 0x1fffffffu;
+    uintptr_t end = (uintptr_t)__psbridge_heap_end & 0x1fffffffu;
+    if (address >= start && address < end && size <= end - address)
+        return (const u8 *)(uintptr_t)(address | 0x80000000u);
+    return NULL;
+}
+
+static u32 premultiply_for_gs(u32 color, GeGsBlend blend)
+{
+    unsigned alpha = color >> 24;
+    unsigned bias = blend == GE_GS_BLEND_REVERSE_SUBTRACT ? 254 : 0;
+    u32 result = color & 0xff000000u;
+
+    for (unsigned shift = 0; shift < 24; shift += 8) {
+        unsigned product = ((color >> shift) & 255) * alpha + bias;
+        result |= (product / 255) << shift;
+    }
+    return result;
+}
+
+static void upload_indexed_texture(
+    const u8 *pixels, int format, int swizzled, int row_bytes,
+    int width, int height, int tbw, int psm, u32 vram)
+{
+    int indices_per_byte = format == 4 ? 2 : 1;
+    int source_width = width / indices_per_byte;
+    int transfer_bytes = source_width < 16 ? 16 : source_width;
+    gs_transfer(vram, psm, 0, height, tbw, transfer_bytes * indices_per_byte, 0);
+    if (!swizzled && row_bytes == transfer_bytes && source_width == transfer_bytes &&
+        !((uintptr_t)pixels & 15)) {
+        upload_rows((u8 *)pixels, height * transfer_bytes / 16);
+    } else {
+        int chunk_rows = sizeof(decoded) / transfer_bytes;
+        for (int y = 0; y < height; y += chunk_rows) {
+            int rows = height - y < chunk_rows ? height - y : chunk_rows;
+            u8 *out = (u8 *)decoded;
+            for (int row = y; row < y + rows; row++, out += transfer_bytes) {
+                const u8 *source = pixels + pixel_offset(0, row, row_bytes, 1, swizzled);
+                if (swizzled) {
+                    int x = 0;
+                    for (; x + 16 <= source_width; x += 16, source += 128)
+                        memcpy(out + x, source, 16);
+                    if (x < source_width)
+                        memcpy(out + x, source, source_width - x);
+                } else {
+                    memcpy(out, source, source_width);
+                }
+                if (transfer_bytes > source_width)
+                    memset(out + source_width, 0, transfer_bytes - source_width);
+            }
+            upload_rows((u8 *)decoded, rows * transfer_bytes / 16);
+        }
+    }
+}
+
+static const GeHardwareTexture *load_texture(
+    u32 vertex_color, GeGsBlend blend, int binary_alpha_required,
+    GeGsTextureFunction texture_function, int blend_alpha_ref)
 {
     int format = ge_state.command[GE_TEXFORMAT] & 15;
     int swizzled = ge_state.command[GE_TEXMODE] & 1;
@@ -269,11 +402,17 @@ static const GeHardwareTexture *load_texture(u32 vertex_color)
         return NULL;
 
     u32 address = buffer_address(GE_TEXADDR0, GE_TEXBUFWIDTH0);
-    unsigned rows = compressed ? (height + 3) >> 2 : swizzled ? (height + 7) & ~7 : height;
-    unsigned source_size = row_bytes * rows;
-    const u8 *pixels = psbridge_ram_pointer(address, source_size);
+    unsigned source_size;
+    if (compressed) {
+        source_size = ((height - 1) >> 2) * row_bytes + ((width + 3) >> 2) * block_bytes;
+    } else {
+        int used_bytes = (width * bits[format] + 7) / 8;
+        source_size = pixel_offset(used_bytes - 1, height - 1, row_bytes, 1, swizzled) + 1;
+    }
+    const u8 *pixels = texture_source(address, source_size);
     if (!pixels)
         return NULL;
+    ge_hardware_read(pixels, source_size);
 
     int indexed = format == 4 || format == 5;
     u32 revision = indexed ? palette_revision() : 0;
@@ -284,15 +423,18 @@ static const GeHardwareTexture *load_texture(u32 vertex_color)
         pixels, revision, indexed ? ge_state.command[GE_CLUTFORMAT] : 0,
         (row_bytes << 5) | (swizzled << 4) | format, size,
         ge_state.command[GE_TEXFUNC], ge_state.command[GE_TEXENVCOLOR], vertex_color,
+        blend, binary_alpha_required, texture_function, blend_alpha_ref,
     };
     for (unsigned i = 0; i < texture_count; i++) {
         if (!memcmp(&key, &textures[i].key, sizeof(key)))
-            return &textures[i];
+            return textures[i].tex0 ? &textures[i] : NULL;
     }
 
-    int tbw = (width + 63) / 64;
-    unsigned bytes = gsKit_texture_size(tbw * 64, height, GS_PSM_CT32);
-    if (bytes > GS_GE_TEXTURE_BYTES)
+    int tbw = indexed ? 2 * ((width + 127) / 128) : (width + 63) / 64;
+    int psm = format == 4 ? GS_PSM_T4 : format == 5 ? GS_PSM_T8 : GS_PSM_CT32;
+    unsigned texture_bytes = gsKit_texture_size(tbw * 64, height, psm);
+    unsigned palette_bytes = format == 4 ? 256 : format == 5 ? 1024 : 0;
+    if (texture_bytes + palette_bytes > GS_GE_TEXTURE_BYTES)
         return NULL;
     if (!texture_vram) {
         u32 allocation = psbridge_graphics_alloc_texture(GS_GE_TEXTURE_BYTES);
@@ -301,88 +443,133 @@ static const GeHardwareTexture *load_texture(u32 vertex_color)
         texture_vram = allocation;
     }
 
-    if (bytes > GS_GE_TEXTURE_BYTES - texture_used ||
-        texture_count == sizeof(textures) / sizeof(textures[0]))
-        ge_hardware_texture_dirty();
-
-    u32 vram = texture_vram + texture_used;
-    u32 palette[256];
+    const GeHardwareImage *image = NULL;
     if (indexed) {
-        int entries = format == 4 ? 16 : 256;
-        for (int i = 0; i < entries; i++)
-            palette[i] = shade_pixel(palette_color(i), vertex_color);
-    }
-    GeDxtSampler dxt;
-    if (compressed) {
-        dxt = (GeDxtSampler){
-            .texture = pixels, .width = width, .height = height,
-            .blocks_w = row_bytes / block_bytes, .bytes = block_bytes, .format = format,
-        };
-    }
-
-    int binary_alpha = 1;
-    gs_transfer(vram, GS_PSM_CT32, 0, height, tbw, width, 0);
-    for (int y = 0; y < height; y += GS_GE_TEXTURE_ROWS) {
-        int rows = height - y < GS_GE_TEXTURE_ROWS ? height - y : GS_GE_TEXTURE_ROWS;
-        u32 *out = decoded;
-        for (int row = y; row < y + rows; row++) {
-            for (int x = 0; x < width; x++) {
-                u32 color;
-                if (format == 4) {
-                    u8 indices = pixels[pixel_offset(x >> 1, row, row_bytes, 1, swizzled)];
-                    color = palette[(indices >> ((x & 1) * 4)) & 15];
-                } else if (format == 5) {
-                    color = palette[pixels[pixel_offset(x, row, row_bytes, 1, swizzled)]];
-                } else if (compressed) {
-                    color = shade_pixel(ge_dxt_pixel(&dxt, x, row), vertex_color);
-                } else if (format == 3) {
-                    u32 sample;
-                    memcpy(&sample, pixels + pixel_offset(x, row, row_bytes, 4, swizzled), 4);
-                    color = shade_pixel(sample, vertex_color);
-                } else {
-                    u16 sample;
-                    memcpy(&sample, pixels + pixel_offset(x, row, row_bytes, 2, swizzled), 2);
-                    color = shade_pixel(unpack_color(sample, format), vertex_color);
-                }
-                *out++ = color;
-                unsigned alpha = color >> 24;
-                binary_alpha &= alpha == 0 || alpha == 255;
+        for (unsigned i = 0; i < image_count; i++) {
+            if (images[i].pixels == pixels && images[i].layout == key.layout && images[i].size == size) {
+                image = &images[i];
+                break;
             }
         }
-        upload_rows((u8 *)decoded, rows * width / 4);
     }
 
-    texture_used += bytes;
+    if ((image ? palette_bytes : texture_bytes + palette_bytes) > GS_GE_TEXTURE_BYTES - texture_used ||
+        texture_count == sizeof(textures) / sizeof(textures[0])) {
+        ge_hardware_texture_dirty();
+        image = NULL;
+    }
+
+    u32 palette[256] __attribute__((aligned(64)));
+    int binary_alpha = 1;
+    if (indexed) {
+        int entries = format == 4 ? 16 : 256;
+        for (int i = 0; i < entries; i++) {
+            u32 color = shade_pixel(palette_color(i), vertex_color);
+            unsigned alpha = color >> 24;
+            binary_alpha &= alpha == 0 || alpha == 255;
+            int slot = format == 4 ? i : (i & ~0x18) | ((i & 8) << 1) | ((i & 16) >> 1);
+            if (texture_function == GE_GS_TEXTURE_MODULATE_RGBA) {
+                color = (color & 0xffffffu) | (((alpha + (alpha == 255)) >> 1) << 24);
+            } else if (blend == GE_GS_BLEND_SOURCE_ALPHA) {
+                unsigned weight = alpha > (unsigned)blend_alpha_ref ?
+                    (alpha + (alpha == 1 || alpha == 255)) >> 1 : 0;
+                color = (color & 0xffffffu) | (weight << 24);
+            } else if (blend != GE_GS_BLEND_NONE) {
+                color = premultiply_for_gs(color, blend);
+            }
+            palette[slot] = color;
+        }
+        if (binary_alpha_required && !binary_alpha) {
+            textures[texture_count++] = (GeHardwareTexture){ .key = key };
+            return NULL;
+        }
+    }
+
+    u32 free_vram = texture_vram + texture_used;
+    u32 vram = image ? image->vram : free_vram;
+    u32 clut = 0;
+    if (indexed) {
+        if (!image) {
+            upload_indexed_texture(pixels, format, swizzled, row_bytes, width, height, tbw, psm, vram);
+            images[image_count++] = (GeHardwareImage){ pixels, key.layout, size, vram };
+        }
+        clut = free_vram + (image ? 0 : texture_bytes);
+        gs_transfer(clut, GS_PSM_CT32, 0, format == 4 ? 2 : 16, 1, format == 4 ? 8 : 16, 0);
+        upload_rows((u8 *)palette, (format == 4 ? 16 : 256) * sizeof(*palette) / 16);
+    } else {
+        GeDxtSampler dxt = {
+            .texture = pixels, .width = width, .height = height,
+            .blocks_w = row_bytes / block_bytes, .bytes = block_bytes,
+            .format = format,
+        };
+        gs_transfer(vram, GS_PSM_CT32, 0, height, tbw, width, 0);
+        for (int y = 0; y < height; y += GS_GE_TEXTURE_ROWS) {
+            int rows = height - y < GS_GE_TEXTURE_ROWS ? height - y : GS_GE_TEXTURE_ROWS;
+            u32 *out = decoded;
+            for (int row = y; row < y + rows; row++) {
+                for (int x = 0; x < width; x++) {
+                    u32 color;
+                    if (compressed) {
+                        color = shade_pixel(ge_dxt_pixel(&dxt, x, row), vertex_color);
+                    } else if (format == 3) {
+                        u32 sample;
+                        memcpy(&sample, pixels + pixel_offset(x, row, row_bytes, 4, swizzled), 4);
+                        color = shade_pixel(sample, vertex_color);
+                    } else {
+                        u16 sample;
+                        memcpy(&sample, pixels + pixel_offset(x, row, row_bytes, 2, swizzled), 2);
+                        color = shade_pixel(unpack_color(sample, format), vertex_color);
+                    }
+                    if (blend != GE_GS_BLEND_NONE)
+                        color = premultiply_for_gs(color, blend);
+                    *out++ = color;
+                    unsigned alpha = color >> 24;
+                    binary_alpha &= alpha == 0 || alpha == 255;
+                }
+            }
+            upload_rows((u8 *)decoded, rows * width / 4);
+        }
+    }
+
+    texture_used += (image ? 0 : texture_bytes) + palette_bytes;
     GeHardwareTexture *entry = &textures[texture_count++];
-    *entry = (GeHardwareTexture){
-        .key = key,
-        .tex0 = GS_SETREG_TEX0(vram / 256, tbw, GS_PSM_CT32, width_shift, height_shift,
-            1, 1, 0, 0, 0, 0, 0),
-        .binary_alpha = binary_alpha,
-    };
+    *entry = (GeHardwareTexture){ .key = key };
+    if (binary_alpha_required && !binary_alpha)
+        return NULL;
+    entry->tex0 = GS_SETREG_TEX0(vram / 256, tbw, psm, width_shift, height_shift,
+        1, texture_function == GE_GS_TEXTURE_DECAL, clut / 256, GS_PSM_CT32, 0, 0, indexed);
     return entry;
 }
 
 static void draw_state(int primitive, int left, int top, int right, int bottom,
     u32 mask, int depth_write, int depth_test, int alpha_test, int alpha_ref,
-    const GeHardwareTexture *texture)
+    const GeHardwareTexture *texture, GeGsBlend blend)
 {
-    gs_reg(GS_FRAME_2, GS_SETREG_FRAME(batch.vram / 8192, GS_GE_STRIDE / 64,
+    gs_draw_reg(GE_GS_STATE_FRAME, GS_FRAME_2, GS_SETREG_FRAME(batch.vram / 8192, GS_GE_STRIDE / 64,
         batch.format == 3 ? GS_PSM_CT32 : GS_PSM_CT16, mask));
-    gs_reg(GS_ZBUF_2, GS_SETREG_ZBUF(depth_vram / 8192, GS_PSMZ_16, !depth_write));
+    gs_draw_reg(GE_GS_STATE_ZBUF, GS_ZBUF_2, GS_SETREG_ZBUF(depth_vram / 8192, GS_PSMZ_16, !depth_write));
     static const u8 gs_alpha_func[] = {0, 1, 4, 7, 2, 3, 6, 5};
-    gs_reg(GS_TEST_2, GS_SETREG_TEST(alpha_test != 1, gs_alpha_func[alpha_test],
+    gs_draw_reg(GE_GS_STATE_TEST, GS_TEST_2, GS_SETREG_TEST(alpha_test != 1, gs_alpha_func[alpha_test],
         alpha_ref, 0, 0, 0, 1, depth_test));
     batch.depth_written |= depth_write;
-    gs_reg(GS_SCISSOR_2, GS_SETREG_SCISSOR(left, right - 1, top, bottom - 1));
+    gs_draw_reg(GE_GS_STATE_SCISSOR, GS_SCISSOR_2, GS_SETREG_SCISSOR(left, right - 1, top, bottom - 1));
     if (texture) {
         u32 wrap = ge_state.command[GE_TEXWRAP];
-        gs_reg(GS_TEXFLUSH, 0);
-        gs_reg(GS_TEX0_2, texture->tex0);
-        gs_reg(GS_TEX1_2, GS_SETREG_TEX1(1, 0, 0, 0, 0, 0, 0));
-        gs_reg(GS_CLAMP_2, GS_SETREG_CLAMP(wrap & 1, (wrap >> 8) & 1, 0, 0, 0, 0));
+        if (gs_state_changed(GE_GS_STATE_TEXTURE, texture->tex0)) {
+            gs_reg(GS_TEXFLUSH, 0);
+            gs_reg(GS_TEX0_2, texture->tex0);
+        }
+        gs_draw_reg(GE_GS_STATE_CLAMP, GS_CLAMP_2, GS_SETREG_CLAMP(wrap & 1, (wrap >> 8) & 1, 0, 0, 0, 0));
     }
-    gs_reg(GS_PRIM, GS_SETREG_PRIM(primitive, primitive == 3, texture != NULL, 0, 0, 0,
+    int weight = texture && texture->key.texture_function == GE_GS_TEXTURE_MODULATE_RGBA ? 0 : 2;
+    if (blend == GE_GS_BLEND_ADD)
+        gs_draw_reg(GE_GS_STATE_ALPHA, GS_ALPHA_2, GS_SETREG_ALPHA(0, 2, weight, 1, 128));
+    else if (blend == GE_GS_BLEND_REVERSE_SUBTRACT)
+        gs_draw_reg(GE_GS_STATE_ALPHA, GS_ALPHA_2, GS_SETREG_ALPHA(2, 0, weight, 1, 128));
+    else if (blend == GE_GS_BLEND_SOURCE_ALPHA)
+        gs_draw_reg(GE_GS_STATE_ALPHA, GS_ALPHA_2, GS_SETREG_ALPHA(0, 1, 0, 1, 0));
+    gs_reg(GS_PRIM, GS_SETREG_PRIM(primitive, primitive == 3, texture != NULL, 0,
+        blend != GE_GS_BLEND_NONE, 0,
         primitive == 6, 1, 0));
 }
 
@@ -393,7 +580,18 @@ static u32 float_bits(float value)
     return bits;
 }
 
-static void emit_vertex(GeVertex vertex, const GeHardwareTexture *texture)
+static u32 texture_vertex_color(u32 color, GeGsTextureFunction function, int full_alpha)
+{
+    u32 result = function == GE_GS_TEXTURE_MODULATE_RGBA ?
+        (full_alpha ? color & 0xff000000u : (color >> 25) << 24) : 0x80000000u;
+    for (unsigned shift = 0; shift < 24; shift += 8) {
+        unsigned channel = (color >> shift) & 255;
+        result |= ((channel + 1) >> 1) << shift;
+    }
+    return result;
+}
+
+static void emit_vertex(GeVertex vertex, const GeHardwareTexture *texture, int full_alpha)
 {
     float depth = vertex.z;
     u32 z = !(depth >= 0.0f) ? 0 : depth >= 65535.0f ? 65535 : (u32)depth;
@@ -404,6 +602,8 @@ static void emit_vertex(GeVertex vertex, const GeHardwareTexture *texture)
         float t = vertex.v * vertex.inv_w / (1 << (size >> 8));
         gs_reg(GS_ST, GS_SETREG_STQ(float_bits(s), float_bits(t)));
         q = float_bits(vertex.inv_w);
+        if (texture->key.texture_function != GE_GS_TEXTURE_DECAL)
+            vertex.color = texture_vertex_color(vertex.color, texture->key.texture_function, full_alpha);
     }
     gs_reg(GS_RGBAQ, vertex.color | ((u64)q << 32));
     gs_reg(GS_XYZ2, GS_SETREG_XYZ((u32)(vertex.x * 16 + GS_GE_OFFSET),
@@ -452,7 +652,7 @@ int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int r
               v >= 0.0f && v + bottom - top < 1024.0f) ||
             u != (int)u || v != (int)v)
             return 0;
-        texture = load_texture(second.color);
+        texture = load_texture(second.color, GE_GS_BLEND_NONE, 0, GE_GS_TEXTURE_DECAL, 0);
         if (!texture)
             return 0;
     }
@@ -471,22 +671,19 @@ int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int r
     if (!begin_draw(top, bottom, depth, full && !mask && !texture, full && depth))
         return 0;
 
-    if (batch.format == 1)
-        mask = pack_color_5551(mask) * 0x10001u;
-
     draw_state(6, left, top, right, bottom, mask, depth != NULL, 1,
-        alpha_test, alpha_ref, texture);
+        alpha_test, alpha_ref, texture, GE_GS_BLEND_NONE);
     second.x = left;
     second.y = top;
     if (texture)
         gs_reg(GS_UV, GS_SETREG_UV((u32)(u * 16), (u32)(v * 16)));
-    emit_vertex(second, NULL);
+    emit_vertex(second, NULL, 0);
     second.x = right;
     second.y = bottom;
     if (texture)
         gs_reg(GS_UV, GS_SETREG_UV((u32)((u + right - left) * 16),
             (u32)((v + bottom - top) * 16)));
-    emit_vertex(second, NULL);
+    emit_vertex(second, NULL, 0);
     return 1;
 }
 
@@ -494,6 +691,12 @@ static int vertex_in_gs(GeVertex vertex)
 {
     return vertex.x >= -2048.0f && vertex.x < 2048.0f &&
         vertex.y >= -2048.0f && vertex.y < 2048.0f;
+}
+
+static int texture_coords_in_gs(GeVertex vertex)
+{
+    return vertex.u >= -4096.0f && vertex.u <= 4096.0f &&
+        vertex.v >= -4096.0f && vertex.v <= 4096.0f;
 }
 
 int ge_hardware_triangle(GeVertex a, GeVertex b, GeVertex c, int left, int top, int right, int bottom)
@@ -517,10 +720,21 @@ int ge_hardware_triangle(GeVertex a, GeVertex b, GeVertex c, int left, int top, 
         if (!alpha_test)
             return 1;
     }
-    if (blend && (!textured || (ge_blend_mode_seen &&
-        (ge_state.command[GE_BLENDMODE] & 0x7ff) != 0x32) ||
-        compare_alpha(alpha_test, 0, alpha_ref)))
-        return 0;
+    GeGsBlend gs_blend = GE_GS_BLEND_NONE;
+    if (blend) {
+        u32 mode = ge_blend_mode_seen ? ge_state.command[GE_BLENDMODE] & 0x7ff : 0x32;
+        if (!textured)
+            return 0;
+        if (mode == 0x32) {
+            if (compare_alpha(alpha_test, 0, alpha_ref))
+                return 0;
+        } else if ((ge_state.command[GE_BLENDFIXEDB] & 0xffffff) == 0xffffff &&
+            (mode == 0x0a2 || mode == 0x2a2)) {
+            gs_blend = mode == 0x0a2 ? GE_GS_BLEND_ADD : GE_GS_BLEND_REVERSE_SUBTRACT;
+        } else {
+            return 0;
+        }
+    }
 
     int depth_test = 1;
     int depth_write = 0;
@@ -549,30 +763,73 @@ int ge_hardware_triangle(GeVertex a, GeVertex b, GeVertex c, int left, int top, 
     }
 
     const GeHardwareTexture *texture = NULL;
+    u32 mask = 0;
     if (textured) {
-        if (a.color != b.color || b.color != c.color ||
-            !(a.inv_w > 0.0f) || !(b.inv_w > 0.0f) || !(c.inv_w > 0.0f) ||
-            !(a.u >= 0.0f && a.u <= 4096.0f && a.v >= 0.0f && a.v <= 4096.0f) ||
-            !(b.u >= 0.0f && b.u <= 4096.0f && b.v >= 0.0f && b.v <= 4096.0f) ||
-            !(c.u >= 0.0f && c.u <= 4096.0f && c.v >= 0.0f && c.v <= 4096.0f))
+        if (!(a.inv_w > 0.0f) || !(b.inv_w > 0.0f) || !(c.inv_w > 0.0f))
+            return 0;
+        if (!texture_coords_in_gs(a) || !texture_coords_in_gs(b) || !texture_coords_in_gs(c))
             return 0;
         int format = ge_state.command[GE_FRAMEBUF_FORMAT] & 3;
         int stride = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
         if ((format != 1 && format != 3) || stride != GS_GE_STRIDE || bottom > GS_GE_HEIGHT)
             return 0;
 
-        texture = load_texture(a.color);
-        if (!texture || (blend && !texture->binary_alpha))
+        int tex_format = ge_state.command[GE_TEXFORMAT] & 15;
+        int indexed = tex_format == 4 || tex_format == 5;
+        GeGsTextureFunction function = GE_GS_TEXTURE_DECAL;
+        u32 palette_color = a.color;
+        if (blend && gs_blend == GE_GS_BLEND_NONE &&
+            indexed && format == 1 && alpha_test == 6)
+            gs_blend = GE_GS_BLEND_SOURCE_ALPHA;
+
+        if (a.color != b.color || b.color != c.color) {
+            if (!indexed || gs_blend == GE_GS_BLEND_NONE || (ge_state.command[GE_TEXFUNC] & 7) != 0)
+                return 0;
+            if (((a.color ^ b.color) | (b.color ^ c.color)) >> 24) {
+                if (format != 1 || alpha_test != 1)
+                    return 0;
+                function = GE_GS_TEXTURE_MODULATE_RGBA;
+                palette_color = 0xffffffffu;
+            } else {
+                function = GE_GS_TEXTURE_MODULATE_RGB;
+                palette_color |= 0xffffffu;
+            }
+        }
+
+        int blend_ref = gs_blend == GE_GS_BLEND_SOURCE_ALPHA ? alpha_ref : 0;
+        texture = load_texture(palette_color, gs_blend, blend && gs_blend == GE_GS_BLEND_NONE,
+            function, blend_ref);
+        if (!texture)
             return 0;
     }
 
     if (!begin_draw(top, bottom, depth, 0, 0))
         return 0;
 
-    draw_state(3, left, top, right, bottom, 0, depth_write, depth_test,
-        alpha_test, alpha_ref, texture);
-    emit_vertex(a, texture);
-    emit_vertex(b, texture);
-    emit_vertex(c, texture);
+    if (texture && texture->key.texture_function == GE_GS_TEXTURE_MODULATE_RGBA &&
+        (a.color | b.color | c.color) >> 31) {
+        draw_state(3, left, top, right, bottom, 0x00ffffffu, 0, depth_test,
+            1, 0, texture, GE_GS_BLEND_NONE);
+        emit_vertex(a, texture, 1);
+        emit_vertex(b, texture, 1);
+        emit_vertex(c, texture, 1);
+        mask = 0x80000000u;
+    } else if (gs_blend == GE_GS_BLEND_SOURCE_ALPHA) {
+        gs_reg(GS_FBA_2, 1);
+        draw_state(3, left, top, right, bottom, 0x00ffffffu, 0, depth_test,
+            7, 64, texture, GE_GS_BLEND_NONE);
+        emit_vertex(a, texture, 0);
+        emit_vertex(b, texture, 0);
+        emit_vertex(c, texture, 0);
+        gs_reg(GS_FBA_2, 0);
+        mask = 0x80000000u;
+        alpha_ref = 0;
+    }
+
+    draw_state(3, left, top, right, bottom, mask, depth_write, depth_test,
+        alpha_test, alpha_ref, texture, gs_blend);
+    emit_vertex(a, texture, 0);
+    emit_vertex(b, texture, 0);
+    emit_vertex(c, texture, 0);
     return 1;
 }

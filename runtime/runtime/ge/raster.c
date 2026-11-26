@@ -916,6 +916,7 @@ typedef struct {
     int clear;
     int blend;
     int blend_source_alpha;
+    int blend_fixed_destination;
 } TriangleTarget;
 
 typedef struct {
@@ -1118,6 +1119,69 @@ static inline __attribute__((always_inline)) int raster_compare(
     return value >= reference;
 }
 
+static inline __attribute__((always_inline)) u16 triangle_depth_value(float depth)
+{
+    if (depth < 0.0f)
+        depth = 0.0f;
+    if (depth > 65535.0f)
+        depth = 65535.0f;
+    return (u16)(u32)depth;
+}
+
+static inline __attribute__((always_inline)) u32 blend_fixed_destination(
+    u32 source, u32 destination, int subtract)
+{
+    unsigned alpha = source >> 24;
+    u32 rb = (source & 0x00ff00ffu) * alpha;
+    u32 green = ((source >> 8) & 255u) * alpha;
+
+    if (subtract) {
+        rb += 0x00fe00feu;
+        green += 254;
+    }
+    rb = ((rb + 0x00010001u + ((rb >> 8) & 0x00ff00ffu)) >> 8) & 0x00ff00ffu;
+    u32 contribution = rb | (raster_div255(green) << 8);
+    u32 result;
+    if (subtract)
+        __asm__("psubub %0, %1, %2" : "=r"(result) : "r"(destination), "r"(contribution));
+    else
+        __asm__("paddub %0, %1, %2" : "=r"(result) : "r"(destination), "r"(contribution));
+    return (result & 0x00ffffffu) | (source & 0xff000000u);
+}
+
+static inline __attribute__((always_inline)) void triangle_target_store_5551(
+    const TriangleTarget *target, u16 *frame, u16 *depth, u32 color, u16 z)
+{
+    if (target->alpha_test && !raster_compare(
+        target->alpha_function, (color >> 24) & target->alpha_mask,
+        target->alpha_reference))
+        return;
+
+    if (target->clear & 1) {
+        u16 mask = ((target->clear & 0x100) ? 0x7fff : 0) |
+            ((target->clear & 0x200) ? 0x8000 : 0);
+        *frame = (pack_color_5551(color) & mask) | (*frame & ~mask);
+    } else if (!target->blend) {
+        *frame = pack_color_5551(color);
+    } else if (target->blend_source_alpha) {
+        unsigned alpha = color >> 24;
+        if (alpha == 255)
+            *frame = pack_color_5551(color);
+        else if (alpha)
+            *frame = pack_color_5551(blend_dxt_packed(color, unpack_color_5551(*frame)));
+    } else {
+        u32 destination = unpack_color_5551(*frame);
+        if (target->blend_fixed_destination)
+            color = blend_fixed_destination(color, destination, target->blend_fixed_destination < 0);
+        else
+            color = blend_color(color, destination);
+        *frame = pack_color_5551(color);
+    }
+
+    if (depth && target->depth_write)
+        *depth = z;
+}
+
 static inline __attribute__((always_inline)) void triangle_target_store(
     const TriangleTarget *target, u32 *frame, u16 *depth_buffer,
     u32 color, float depth)
@@ -1130,11 +1194,7 @@ static inline __attribute__((always_inline)) void triangle_target_store(
         return;
 
     if (depth_buffer) {
-        if (depth < 0.0f)
-            depth = 0.0f;
-        if (depth > 65535.0f)
-            depth = 65535.0f;
-        value = (u16)(u32)depth;
+        value = triangle_depth_value(depth);
         if (target->depth_test && !raster_compare(
             target->depth_function, value, *depth_buffer))
             return;
@@ -1168,6 +1228,7 @@ static inline __attribute__((always_inline)) void triangle_target_store(
 static int triangle_target_setup(TriangleTarget *target, int format)
 {
     u32 alpha_command = ge_state.command[GE_ALPHATEST];
+    u32 blend_mode = ge_state.command[GE_BLENDMODE] & 0x7ff;
     target->width = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
     if ((ge_state.command[GE_FRAMEBUF_FORMAT] & 3) != format ||
         target->width < 64 || target->width > 2048)
@@ -1177,8 +1238,9 @@ static int triangle_target_setup(TriangleTarget *target, int format)
         return 0;
     target->clear = ge_state.command[GE_CLEARMODE];
     target->blend = ge_state.command[GE_BLEND_ENABLE] & 1;
-    target->blend_source_alpha = !ge_blend_mode_seen ||
-        ((ge_state.command[GE_BLENDMODE] & 0x7ff) == 0x32);
+    target->blend_source_alpha = !ge_blend_mode_seen || blend_mode == 0x32;
+    if (ge_blend_mode_seen && (ge_state.command[GE_BLENDFIXEDB] & 0xffffff) == 0xffffff)
+        target->blend_fixed_destination = blend_mode == 0xa2 ? 1 : blend_mode == 0x2a2 ? -1 : 0;
     target->alpha_test = (ge_state.command[GE_ALPHA_TEST_ENABLE] & 1) && !(target->clear & 1);
     target->alpha_function = alpha_command & 7;
     target->alpha_mask = (alpha_command >> 16) & 0xff;
@@ -1322,15 +1384,6 @@ static const u32 *triangle_5551_span_colors(
         colors[index] = texel;
     }
     return colors;
-}
-
-static inline __attribute__((always_inline)) u16 triangle_depth_value(float depth)
-{
-    if (depth < 0.0f)
-        depth = 0.0f;
-    if (depth > 65535.0f)
-        depth = 65535.0f;
-    return (u16)(u32)depth;
 }
 
 static inline u64 repeat_pixel_5551(u16 pixel)
@@ -1585,6 +1638,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
     TriangleRgbaTexture rgba_texture;
     TriangleTarget target = {0};
     int fast_target;
+    int fast_5551;
     int fast_dxt;
     int affine;
     int direct_white;
@@ -1718,11 +1772,11 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         return;
     ge_hardware_cpu_write();
 
-    if ((ge_state.command[GE_VERTEXTYPE] & (1 << 23)) &&
-        triangle_target_setup(&target, 1) &&
+    fast_5551 = triangle_target_setup(&target, 1);
+    if (fast_5551 && (ge_state.command[GE_VERTEXTYPE] & (1 << 23)) &&
         draw_right_triangle_5551(&target, a, b, c, left, top, right, bottom, textured))
         return;
-    fast_target = triangle_target_setup(&target, 3);
+    fast_target = !fast_5551 && triangle_target_setup(&target, 3);
     affine = a.inv_w == 1.0f && b.inv_w == 1.0f && c.inv_w == 1.0f;
     texfunc = ge_state.command[GE_TEXFUNC] & 7;
     tex_use_alpha = ge_state.command[GE_TEXFUNC] & 0x100;
@@ -2024,6 +2078,7 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         float q;
         float z;
         u32 *target_frame_row;
+        u16 *target_frame_5551_row;
         u16 *target_depth_row;
 
         triangle_scan_span(a, b, c, y, left, right, &xstart, &xend);
@@ -2039,13 +2094,20 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
         q = q_row + skip * q_dx;
         z = z_row + skip * z_dx;
         target_frame_row = fast_target ? target.frame + y * target.width : NULL;
-        target_depth_row = fast_target && target.depth ?
+        target_frame_5551_row = fast_5551 ? (u16 *)target.frame + y * target.width : NULL;
+        target_depth_row = (fast_target || fast_5551) && target.depth ?
             target.depth + y * target.depth_width : NULL;
 
         for (x = xstart; x <= xend; x++) {
             float wc = 1.0f - wa - wb;
 
             if (wa >= 0.0f && wb >= 0.0f && wc >= 0.0f) {
+                u16 *depth = target_depth_row ? target_depth_row + x : NULL;
+                u16 z_value = fast_5551 && depth ? triangle_depth_value(z) : 0;
+                if (fast_5551 && depth && target.depth_test &&
+                    !raster_compare(target.depth_function, z_value, *depth))
+                    goto next_pixel;
+
                 u32 color =
                     (u32)(int)red |
                     ((u32)(int)green << 8) |
@@ -2079,16 +2141,16 @@ static void draw_triangle(GeVertex a, GeVertex b, GeVertex c)
                         *destination = color;
                     else if (alpha)
                         *destination = blend_dxt_packed(color, *destination);
-                } else if (fast_target)
-                    triangle_target_store(
-                        &target, target_frame_row + x,
-                        target_depth_row ? target_depth_row + x : NULL,
-                        color, z
-                    );
-                else
+                } else if (fast_target) {
+                    triangle_target_store(&target, target_frame_row + x, depth, color, z);
+                } else if (fast_5551) {
+                    triangle_target_store_5551(&target, target_frame_5551_row + x, depth, color, z_value);
+                } else {
                     draw_pixel_internal(x, y, color, z, 1);
+                }
             }
 
+next_pixel:
             wa += wa_dx;
             wb += wb_dx;
             red += red_dx;
@@ -2280,9 +2342,6 @@ void draw_primitive(u32 argument)
     if (count <= 0)
         return;
 
-    ge_hardware_read(ge_pointer(ge_state.vertex_address));
-    if (index_type)
-        ge_hardware_read(ge_pointer(ge_state.index_address));
     layout = vertex_layout(type);
     if (primitive == 6) {
         for (index = 0; index + 1 < count; index += 2)
