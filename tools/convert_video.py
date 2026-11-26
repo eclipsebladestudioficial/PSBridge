@@ -9,7 +9,9 @@ from tempfile import TemporaryDirectory
 
 VIDEO_DIRECTORY = ".video"
 PACKET_SIZE = 2048
-VIDEO_VERSION = 5
+VIDEO_VERSION = 7
+VIDEO_MAX_WIDTH = 240
+VIDEO_MAX_HEIGHT = 144
 
 
 def fingerprint(data):
@@ -52,7 +54,7 @@ def video_channels(header):
             yield header[pos] & 15
 
 
-def write_video_timestamps(path, output, track, offset, ffprobe):
+def write_video_timestamps(path, output, track, size, offset, ffprobe):
     command = [
         ffprobe,
         "-v", "error",
@@ -63,7 +65,7 @@ def write_video_timestamps(path, output, track, offset, ffprobe):
     ]
 
     with output.open("wb") as timestamps:
-        timestamps.write(struct.pack("<II", track["width"], track["height"]))
+        timestamps.write(struct.pack("<IIII", track["width"], track["height"], *size))
 
         with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as probe:
             packet = 1
@@ -110,8 +112,21 @@ def convert_video(path, directory, header, offset, ffmpeg, ffprobe):
         if not (0 < width <= 480 and 0 < height <= 272):
             raise ValueError(f"tamanho de vídeo zuado em {path.name}")
 
+        if width <= VIDEO_MAX_WIDTH and height <= VIDEO_MAX_HEIGHT:
+            size = width, height
+        elif width * VIDEO_MAX_HEIGHT > height * VIDEO_MAX_WIDTH:
+            size = VIDEO_MAX_WIDTH, max(2, (height * VIDEO_MAX_WIDTH // width) & ~1)
+        else:
+            size = max(2, (width * VIDEO_MAX_HEIGHT // height) & ~1), VIDEO_MAX_HEIGHT
+
         output = directory / f"v{channel:02x}"
-        write_video_timestamps(path, output.with_suffix(".pts"), track, offset, ffprobe)
+        write_video_timestamps(path, output.with_suffix(".pts"), track, size, offset, ffprobe)
+        video = output.with_suffix(".m2v")
+        filters = (
+            f"scale={size[0]}:{size[1]}:flags=lanczos,"
+            "format=yuv420p,pad=ceil(iw/16)*16:ceil(ih/16)*16,"
+            "tpad=stop_mode=clone:stop=1,settb=1/30,setpts=N"
+        )
 
         command = [
             ffmpeg,
@@ -122,17 +137,23 @@ def convert_video(path, directory, header, offset, ffmpeg, ffprobe):
             "-i", path,
             "-map", f"0:{track['index']}",
             "-an",
-            "-vf", "settb=1/30,setpts=N",
+            "-vf", filters,
             "-r", "30",
             "-fps_mode", "cfr",
             "-threads", "2",
-            "-c:v", "mjpeg",
-            "-pix_fmt", "yuvj420p",
-            "-q:v", "7",
-            "-f", "mjpeg",
-            output.with_suffix(".mjpg"),
+            "-c:v", "mpeg2video",
+            "-bf", "0",
+            "-g", "12",
+            "-q:v", "4",
+            "-maxrate", "8000k",
+            "-bufsize", "1835008",
+            "-f", "mpeg2video",
+            video,
         ]
         subprocess.run(command, check=True)
+
+        with video.open("ab") as stream:
+            stream.write(b"\0\0\1\xb7")
 
 
 def pes_timestamp(data):

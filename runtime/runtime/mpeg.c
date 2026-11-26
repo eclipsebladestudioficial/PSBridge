@@ -1,19 +1,27 @@
+#include <dma.h>
+#include <ee_regs.h>
 #include <fcntl.h>
 #include <kernel.h>
+#include <libmpeg.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <jpeglib.h>
-#include <jerror.h>
-
 #include "psbridge.h"
 
 #define MPEG_STREAM_LIMIT 32
 #define MPEG_PACKET_BYTES 2048
 #define MPEG_PCM_BYTES 8192
+#define MPEG_OUTPUT_WIDTH 480
+#define MPEG_OUTPUT_HEIGHT 272
+#define MPEG_MAX_WIDTH 240
+#define MPEG_MAX_HEIGHT 144
+#define MPEG_MAX_COLUMNS (MPEG_MAX_WIDTH / 16)
+#define MPEG_MAX_BLOCKS (MPEG_MAX_COLUMNS * (MPEG_MAX_HEIGHT / 16))
+#define MPEG_REFERENCE_BYTES (3 * 384 * (MPEG_MAX_BLOCKS + MPEG_MAX_COLUMNS + 1) + 2 * MPEG_MAX_BLOCKS)
+#define MPEG_DMA_ADDRESS_MASK 0x1fffffffu
 #define MPEG_INVALID_VALUE 0x806101feu
 #define MPEG_NO_DATA 0x80618001u
 
@@ -33,6 +41,8 @@ typedef struct {
     u32 pending;
     u32 width;
     u32 height;
+    u32 video_width;
+    u32 video_height;
     u32 frames;
     u32 consumed;
     int ended;
@@ -63,16 +73,18 @@ typedef struct {
     MpegStream *stream;
     int file;
     u32 decoded;
-    struct jpeg_decompress_struct jpeg;
-    struct jpeg_error_mgr error;
-    struct jpeg_source_mgr source;
+    u32 width;
+    u32 height;
+    u16 source_x[MPEG_OUTPUT_WIDTH];
+    s64 pts;
     jmp_buf failure;
 } MpegDecoder;
 
 static MpegDecoder decoder;
 static int decoder_lock = -1;
-static u8 input_buffer[16384];
-static u32 picture_row[480];
+static u8 input_buffer[16384] __attribute__((aligned(64)));
+static u8 reference_buffer[MPEG_REFERENCE_BYTES] __attribute__((aligned(64), section(".runtime_scratch")));
+static u32 picture_buffer[MPEG_MAX_WIDTH * MPEG_MAX_HEIGHT] __attribute__((aligned(64)));
 
 static MpegContext *mpeg_context(u32 address)
 {
@@ -150,14 +162,16 @@ static void find_movie(MpegContext *context, const u8 *packet)
 
 static void close_decoder(void)
 {
-    jpeg_destroy_decompress(&decoder.jpeg);
-    if (decoder.stream)
-        close(decoder.file);
+    if (!decoder.stream)
+        return;
+
+    WR_EE_D4_CHCR(0);
+    MPEG_Destroy();
+    close(decoder.file);
     decoder.stream = NULL;
-    decoder.decoded = 0;
 }
 
-static void reset_stream(MpegStream *stream)
+static void close_stream_decoder(MpegStream *stream)
 {
     if (decoder_lock >= 0) {
         WaitSema(decoder_lock);
@@ -165,6 +179,11 @@ static void reset_stream(MpegStream *stream)
             close_decoder();
         SignalSema(decoder_lock);
     }
+}
+
+static void reset_stream(MpegStream *stream)
+{
+    close_stream_decoder(stream);
 
     if (stream->file >= 0)
         close(stream->file);
@@ -210,69 +229,80 @@ static void reset_streams(MpegContext *context)
     update_ring(context);
 }
 
-static void decoder_error(j_common_ptr jpeg)
+void *psbridge_mpeg_memalign(size_t alignment, size_t bytes)
 {
-    (void)jpeg;
-    longjmp(decoder.failure, 1);
+    if (alignment > 64 || bytes > sizeof(reference_buffer))
+        longjmp(decoder.failure, 1);
+
+    u8 *memory = (u8 *)((uintptr_t)reference_buffer & MPEG_DMA_ADDRESS_MASK);
+    SyncDCache(memory, memory + bytes);
+    return memory;
 }
 
-static void decoder_warning(j_common_ptr jpeg, int level)
+void psbridge_mpeg_free(void *memory)
 {
-    if (level < 0)
-        decoder_error(jpeg);
+    (void)memory;
 }
 
-static void source_marker(j_decompress_ptr jpeg)
+static int fill_picture_input(void *userdata)
 {
-    (void)jpeg;
-}
+    MpegDecoder *state = userdata;
+    dma_channel_wait(DMA_CHANNEL_toIPU, 0);
 
-static boolean fill_picture_input(j_decompress_ptr jpeg)
-{
-    int bytes = read(decoder.file, input_buffer, sizeof(input_buffer));
+    int bytes = read_block(state->file, input_buffer, sizeof(input_buffer));
     if (bytes <= 0)
-        ERREXIT(jpeg, JERR_INPUT_EOF);
+        return 0;
 
-    jpeg->src->next_input_byte = input_buffer;
-    jpeg->src->bytes_in_buffer = bytes;
-    return TRUE;
+    unsigned aligned = (bytes + 15) & ~15u;
+    memset(input_buffer + bytes, 0, aligned - bytes);
+    dma_channel_send_normal(DMA_CHANNEL_toIPU, input_buffer, aligned / 16, 0, 0);
+    return 1;
 }
 
-static void skip_picture_input(j_decompress_ptr jpeg, long bytes)
+static void *initialize_picture(void *userdata, MPEGSequenceInfo *info)
 {
-    if (bytes <= 0)
-        return;
+    MpegDecoder *state = userdata;
+    if (info->m_Width != (int)state->width || info->m_Height != (int)state->height ||
+        info->m_ChromaFmt != MPEG_CHROMA_FORMAT_420)
+        longjmp(state->failure, 1);
 
-    while ((unsigned long)bytes > jpeg->src->bytes_in_buffer) {
-        bytes -= jpeg->src->bytes_in_buffer;
-        fill_picture_input(jpeg);
-    }
-
-    jpeg->src->next_input_byte += bytes;
-    jpeg->src->bytes_in_buffer -= bytes;
+    return (void *)((uintptr_t)picture_buffer & MPEG_DMA_ADDRESS_MASK);
 }
 
 static int open_decoder(const MpegContext *context, MpegStream *stream)
 {
     close_decoder();
-    int file = open_track(context, 'v', stream->channel, "mjpg");
+
+    int file = open_track(context, 'v', stream->channel, "m2v");
     if (file < 0)
         return 0;
 
+    u8 header[8];
+    u32 width = (stream->video_width + 15) & ~15u;
+    u32 height = (stream->video_height + 15) & ~15u;
+    if (read_block(file, header, sizeof(header)) != sizeof(header) ||
+        big_endian_word(header) != 0x000001b3 ||
+        big_endian_word(header + 4) >> 8 != ((width << 12) | height) ||
+        lseek(file, 0, SEEK_SET) != 0) {
+        close(file);
+        return 0;
+    }
+
+    SyncDCache(picture_buffer, picture_buffer + width * height);
     decoder.stream = stream;
     decoder.file = file;
-    decoder.jpeg.err = jpeg_std_error(&decoder.error);
-    decoder.error.error_exit = decoder_error;
-    decoder.error.emit_message = decoder_warning;
-    jpeg_create_decompress(&decoder.jpeg);
-    decoder.source = (struct jpeg_source_mgr){
-        .init_source = source_marker,
-        .fill_input_buffer = fill_picture_input,
-        .skip_input_data = skip_picture_input,
-        .resync_to_restart = jpeg_resync_to_restart,
-        .term_source = source_marker,
-    };
-    decoder.jpeg.src = &decoder.source;
+    decoder.decoded = 0;
+    decoder.width = width;
+    decoder.height = height;
+    decoder.pts = 0;
+
+    for (u32 x = 0; x < stream->width; ++x) {
+        u32 column = x * stream->video_width / stream->width;
+        decoder.source_x[x] = (column >> 4) * 256 + (column & 15);
+    }
+
+    dma_channel_initialize(DMA_CHANNEL_toIPU, NULL, 0);
+    MPEG_Initialize(fill_picture_input, &decoder, initialize_picture, &decoder, &decoder.pts);
     return 1;
 }
 
@@ -286,48 +316,47 @@ static u16 video_pixel16(u32 pixel, u32 format)
     return ((pixel >> 4) & 0x000f) | ((pixel >> 8) & 0x00f0) | ((pixel >> 12) & 0x0f00) | 0xf000;
 }
 
+static void copy_picture(const MpegContext *context, const MpegStream *stream, void *output, u32 stride)
+{
+    InvalidDCache(picture_buffer, picture_buffer + decoder.width * decoder.height);
+
+    for (u32 y = 0; y < stream->height; ++y) {
+        u32 row = y * stream->video_height / stream->height;
+        const u32 *block = picture_buffer + (row >> 4) * decoder.width * 16 + (row & 15) * 16;
+
+        if (context->pixel_format == 3) {
+            u32 *pixels = (u32 *)output + y * stride;
+            for (u32 x = 0; x < stream->width; ++x)
+                pixels[x] = block[decoder.source_x[x]] | 0xff000000;
+        } else {
+            u16 *pixels = (u16 *)output + y * stride;
+            for (u32 x = 0; x < stream->width; ++x)
+                pixels[x] = video_pixel16(block[decoder.source_x[x]], context->pixel_format);
+        }
+    }
+}
+
 static int decode_picture(const MpegContext *context, MpegStream *stream, void *output, u32 stride)
 {
-    u32 y, x;
-
     if (setjmp(decoder.failure)) {
         close_decoder();
         return 0;
     }
+
     if (decoder.stream != stream && !open_decoder(context, stream))
         return 0;
 
-    do {
-        struct jpeg_decompress_struct *jpeg = &decoder.jpeg;
-        if (jpeg_read_header(jpeg, TRUE) != JPEG_HEADER_OK ||
-            jpeg->image_width != stream->width || jpeg->image_height != stream->height ||
-            jpeg_has_multiple_scans(jpeg)) {
+    void *picture = (void *)((uintptr_t)picture_buffer & MPEG_DMA_ADDRESS_MASK);
+    while (decoder.decoded <= stream->frames) {
+        if (!MPEG_Picture(picture, &decoder.pts)) {
             close_decoder();
             return 0;
         }
 
-        jpeg->out_color_space = JCS_EXT_RGBA;
-        jpeg->dct_method = JDCT_IFAST;
-        jpeg->do_fancy_upsampling = FALSE;
-        jpeg_start_decompress(jpeg);
-
-        for (y = 0; y < stream->height; ++y) {
-            JSAMPROW row = (JSAMPROW)picture_row;
-            if (decoder.decoded == stream->frames && context->pixel_format == 3)
-                row = (JSAMPROW)((u32 *)output + y * stride);
-            jpeg_read_scanlines(jpeg, &row, 1);
-
-            if (decoder.decoded == stream->frames && context->pixel_format != 3) {
-                u16 *pixels = (u16 *)output + y * stride;
-                for (x = 0; x < stream->width; ++x)
-                    pixels[x] = video_pixel16(picture_row[x], context->pixel_format);
-            }
-        }
-
-        jpeg_finish_decompress(jpeg);
         ++decoder.decoded;
-    } while (decoder.decoded <= stream->frames);
+    }
 
+    copy_picture(context, stream, output, stride);
     psbridge_graphics_draw_invalidate();
     return 1;
 }
@@ -370,11 +399,16 @@ static int open_stream(MpegContext *context, MpegStream *stream, int audio)
             return 1;
         }
     } else {
-        u32 dimensions[2];
+        u32 dimensions[4];
         if (read_block(stream->file, dimensions, sizeof(dimensions)) == sizeof(dimensions) &&
-            dimensions[0] > 0 && dimensions[0] <= 480 && dimensions[1] > 0 && dimensions[1] <= 272) {
+            dimensions[0] > 0 && dimensions[0] <= MPEG_OUTPUT_WIDTH &&
+            dimensions[1] > 0 && dimensions[1] <= MPEG_OUTPUT_HEIGHT &&
+            dimensions[2] > 0 && dimensions[2] <= MPEG_MAX_WIDTH &&
+            dimensions[3] > 0 && dimensions[3] <= MPEG_MAX_HEIGHT) {
             stream->width = dimensions[0];
             stream->height = dimensions[1];
+            stream->video_width = dimensions[2];
+            stream->video_height = dimensions[3];
             return 1;
         }
     }
@@ -411,6 +445,7 @@ static u32 get_access_unit(MpegContext *context, MpegStream *stream, u32 address
         if (!stream->timestamp.packet &&
             read_block(stream->file, &stream->timestamp, sizeof(stream->timestamp)) != sizeof(stream->timestamp)) {
             stream->ended = 1;
+            close_stream_decoder(stream);
             update_ring(context);
             au[2] = au[3] = (u32)-1;
             return MPEG_NO_DATA;

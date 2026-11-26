@@ -1,6 +1,7 @@
 BUILD_DIR = ../build
 RUNTIME_BUILD = $(BUILD_DIR)/runtime
 GAME_ELF ?= $(or $(wildcard $(BUILD_DIR)/converted/jogo.elf),../jogo.elf)
+MPEG_LIB = $(RUNTIME_BUILD)/libmpeg.a
 PYTHON ?= python3
 MAIN_OBJ = $(RUNTIME_BUILD)/main.o
 CORE_OBJS = $(addprefix $(RUNTIME_BUILD)/core/,imports.o guest.o vfpu_entry.o)
@@ -14,7 +15,7 @@ IMPORT_OBJS = $(RUNTIME_BUILD)/core/imports.o \
 EE_BIN = $(BUILD_DIR)/PSBridge-debug.elf
 STRIPPED_BIN = $(BUILD_DIR)/PSBridge-stripped.elf
 EE_OBJS = $(RUNTIME_OBJS) $(BUILD_DIR)/game.o
-EE_LIBS = -L$(GSKIT)/lib -lgskit -ldmakit -ldebug -lm -lc -lpad -L$(PS2SDK)/ports/lib -lwolfssl -ljpeg
+EE_LIBS = -L$(GSKIT)/lib -lgskit -ldmakit -ldebug -lm -lc -lpad -L$(PS2SDK)/ports/lib -lwolfssl $(MPEG_LIB) -ldma
 EE_INCS += -I$(CURDIR)/include -I$(GSKIT)/include -I$(PS2SDK)/ports/include
 EE_LINKFILE = $(CURDIR)/linker/guest.ld
 EE_ASFLAGS += -I$(abspath ..)
@@ -27,7 +28,12 @@ all: $(EE_BIN) $(STRIPPED_BIN)
 
 -include $(RUNTIME_OBJS:.o=.d)
 
-$(EE_BIN): linker/guest.ld Makefile
+$(EE_BIN): linker/guest.ld Makefile $(MPEG_LIB)
+
+$(MPEG_LIB): $(PS2SDK)/ee/lib/libmpeg.a Makefile
+	$(DIR_GUARD)
+	$(EE_OBJCOPY) --remove-section='.gnu.lto_*' --remove-section='.gnu.debuglto_*' \
+		--redefine-sym memalign=psbridge_mpeg_memalign --redefine-sym free=psbridge_mpeg_free $< $@
 
 $(STRIPPED_BIN): $(EE_BIN)
 	cp $< $@
@@ -74,7 +80,7 @@ $(RUNTIME_BUILD)/runtime/ge/%.o: runtime/ge/%.c
 
 clean:
 	rm -f $(EE_BIN) $(STRIPPED_BIN) $(BUILD_DIR)/psbridge.elf $(RUNTIME_OBJS) $(RUNTIME_BUILD)/runtime/vfpu/*.o $(RUNTIME_OBJS:.o=.d) $(BUILD_DIR)/game.o $(BUILD_DIR)/game.s $(BUILD_DIR)/game.bin $(BUILD_DIR)/game.map
-	rm -f $(BUILD_DIR)/game.imports.inc
+	rm -f $(BUILD_DIR)/game.imports.inc $(MPEG_LIB)
 
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal
