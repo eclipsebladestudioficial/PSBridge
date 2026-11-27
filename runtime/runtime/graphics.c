@@ -11,6 +11,7 @@
 #define PSP_HEIGHT 272
 #define PSP_BUFFER_WIDTH 512
 #define TRANSFER_ROWS 8
+#define GS_INIT_QUEUE_BYTES (4 * 1024)
 
 static GSGLOBAL *gs;
 static int graphics_sema;
@@ -50,7 +51,7 @@ int psbridge_graphics_start(void)
     if (graphics_ready)
         return 0;
 
-    gs = gsKit_init_global_custom(128 * 1024, 32 * 1024);
+    gs = gsKit_init_global_custom(GS_INIT_QUEUE_BYTES, GS_INIT_QUEUE_BYTES);
 
     if (!gs)
         return -1;

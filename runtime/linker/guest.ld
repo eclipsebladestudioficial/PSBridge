@@ -5,7 +5,7 @@ PHDRS {
 }
 
 __psbridge_ee_ram_end = 0x82000000;
-__psbridge_sdk_heap_reserve = 256 * 1024;
+__psbridge_sdk_heap_reserve = 128 * 1024;
 
 SECTIONS {
 	.text 0x80100000 : AT(0x00100000) {
