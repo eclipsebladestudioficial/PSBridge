@@ -26,9 +26,16 @@
 static float ge_world[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
 static float ge_view[12] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
 static float ge_projection[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+static float ge_clip_matrix[16];
+static int ge_clip_matrix_dirty = 1;
+static u32 ge_transform_revision;
 static u32 ge_world_index;
 static u32 ge_view_index;
 static u32 ge_projection_index;
+static float ge_viewport[6];
+static float ge_offset[2];
+static float ge_texture_transform[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+static float ge_texture_size[2] = {1.0f, 1.0f};
 static float ge_bones[8][12] = {
     {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0},
     {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0},
@@ -70,66 +77,6 @@ static void ge3d_morph_command(u32 command, u32 value)
     ge_morph[index] = converted.f;
 }
 
-static void ge3d_patch_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_texture_generation_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_viewport_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_lighting_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_material_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_clipping_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_culling_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_depth_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_stencil_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
-static void ge3d_fog_command(u32 command, u32 value)
-{
-    (void)command;
-    (void)value;
-}
-
 static float ge3d_float(u32 argument)
 {
     union {
@@ -140,7 +87,27 @@ static float ge3d_float(u32 argument)
     return v.value;
 }
 
-void ge3d_matrix_command(u32 command, u32 value)
+static int ge3d_set_float(float *element, float value)
+{
+    if (__builtin_memcmp(element, &value, sizeof(value)) == 0)
+        return 0;
+
+    *element = value;
+    ++ge_transform_revision;
+    return 1;
+}
+
+static void ge3d_set_matrix_element(float *element, u32 value)
+{
+    ge_clip_matrix_dirty |= ge3d_set_float(element, ge3d_float(value));
+}
+
+u32 ge3d_transform_revision(void)
+{
+    return ge_transform_revision;
+}
+
+static void ge3d_matrix_command(u32 command, u32 value)
 {
     if (command == GE_WORLDMATRIXNUMBER)
         ge_world_index = value & 15;
@@ -150,83 +117,124 @@ void ge3d_matrix_command(u32 command, u32 value)
         ge_projection_index = value & 15;
     else if (command == GE_WORLDMATRIXDATA) {
         if (ge_world_index < 12)
-            ge_world[ge_world_index] = ge3d_float(value);
+            ge3d_set_matrix_element(&ge_world[ge_world_index], value);
         ge_world_index = (ge_world_index + 1) & 15;
     } else if (command == GE_VIEWMATRIXDATA) {
         if (ge_view_index < 12)
-            ge_view[ge_view_index] = ge3d_float(value);
+            ge3d_set_matrix_element(&ge_view[ge_view_index], value);
         ge_view_index = (ge_view_index + 1) & 15;
     } else if (command == GE_PROJMATRIXDATA) {
-        if (ge_projection_index < 16)
-            ge_projection[ge_projection_index] = ge3d_float(value);
+        ge3d_set_matrix_element(&ge_projection[ge_projection_index], value);
         ge_projection_index = (ge_projection_index + 1) & 15;
     }
 }
 
+static void ge3d_update_clip_matrix(void)
+{
+    for (int column = 0; column < 4; column++) {
+        const float *world = &ge_world[column * 3];
+        int position = column == 3;
+        float x = world[0] * ge_view[0] + world[1] * ge_view[3] + world[2] * ge_view[6];
+        float y = world[0] * ge_view[1] + world[1] * ge_view[4] + world[2] * ge_view[7];
+        float z = world[0] * ge_view[2] + world[1] * ge_view[5] + world[2] * ge_view[8];
+        if (position) {
+            x += ge_view[9];
+            y += ge_view[10];
+            z += ge_view[11];
+        }
+
+        for (int row = 0; row < 4; row++) {
+            float projected = x * ge_projection[row] + y * ge_projection[4 + row] +
+                z * ge_projection[8 + row];
+            ge_clip_matrix[column * 4 + row] = position ? projected + ge_projection[12 + row] : projected;
+        }
+    }
+
+    ge_clip_matrix_dirty = 0;
+}
+
 void ge3d_command(u32 command, u32 value)
 {
-    if (command == 0x05 || command == 0x06 ||
-        (command >= 0x36 && command <= 0x38))
-        ge3d_patch_command(command, value);
-    else if (command >= 0x2a && command <= 0x2b)
+    if (command >= 0x2a && command <= 0x2b)
         ge3d_skinning_command(command, value);
     else if (command >= 0x2c && command <= 0x33)
         ge3d_morph_command(command, value);
-    else if (command >= 0x3a && command <= 0x3f)
+    else if (command >= GE_WORLDMATRIXNUMBER && command <= GE_PROJMATRIXDATA)
         ge3d_matrix_command(command, value);
-    else if (command == 0x40 || command == 0x41 ||
-        command == 0xc0 || command == 0xc1)
-        ge3d_texture_generation_command(command, value);
-    else if (command >= 0x42 && command <= 0x4d)
-        ge3d_viewport_command(command, value);
-    else if ((command >= 0x17 && command <= 0x1b) ||
-        (command >= 0x5f && command <= 0x9a))
-        ge3d_lighting_command(command, value);
-    else if (command >= 0x53 && command <= 0x5e)
-        ge3d_material_command(command, value);
-    else if (command == 0x1c || command == 0xd6 || command == 0xd7)
-        ge3d_clipping_command(command, value);
-    else if (command == 0x1d || command == 0x9b)
-        ge3d_culling_command(command, value);
-    else if (command == 0x23 || command == 0x9e || command == 0x9f ||
-        command == 0xde || command == 0xe7)
-        ge3d_depth_command(command, value);
-    else if (command == 0x24 || command == 0xdc || command == 0xdd)
-        ge3d_stencil_command(command, value);
-    else if (command == 0x1f ||
-        (command >= 0xcd && command <= 0xcf))
-        ge3d_fog_command(command, value);
+    else if (command >= GE_VIEWPORTXSCALE && command <= GE_VIEWPORTZCENTER)
+        ge3d_set_float(&ge_viewport[command - GE_VIEWPORTXSCALE], ge3d_float(value));
+    else if (command >= GE_TEXSCALEU && command <= GE_TEXOFFSETV) {
+        float coordinate = ge3d_float(value);
+        if (command <= GE_TEXSCALEV && coordinate == 0.0f)
+            coordinate = 1.0f;
+        ge3d_set_float(&ge_texture_transform[command - GE_TEXSCALEU], coordinate);
+    } else if (command == GE_OFFSETX || command == GE_OFFSETY) {
+        ge3d_set_float(&ge_offset[command - GE_OFFSETX], (float)(value & 0xffff) * (1.0f / 16.0f));
+    } else if (command == GE_TEXSIZE0) {
+        ge3d_set_float(&ge_texture_size[0], (float)(1 << (value & 0xf)));
+        ge3d_set_float(&ge_texture_size[1], (float)(1 << ((value >> 8) & 0xf)));
+    }
 }
 
-int ge3d_project_vertex(GeVertex *v, const u32 *commands)
+int ge3d_project_vertex(GeVertex *v)
 {
-    float sx = ge3d_float(commands[GE_VIEWPORTXSCALE]);
-    float sy = ge3d_float(commands[GE_VIEWPORTYSCALE]);
-    float sz = ge3d_float(commands[GE_VIEWPORTZSCALE]);
-    float ox = ge3d_float(commands[GE_VIEWPORTXCENTER]);
-    float oy = ge3d_float(commands[GE_VIEWPORTYCENTER]);
-    float oz = ge3d_float(commands[GE_VIEWPORTZCENTER]);
+    float x = v->clip_x;
+    float y = v->clip_y;
+    float z = v->clip_z;
+    float w = v->clip_w;
 
-    if (!isfinite(v->clip_x) || !isfinite(v->clip_y) ||
-        !isfinite(v->clip_z) || !isfinite(v->clip_w) ||
-        fabsf(v->clip_w) < 0.0000001f)
-        return 0;
+    union { float value; u32 bits; } xb = { x }, yb = { y }, zb = { z }, wb = { w };
+    v->clip_flags = 0;
+    if (wb.bits < 0x33d6bf95u || wb.bits >= 0x7f800000u ||
+        (xb.bits & 0x7fffffffu) > wb.bits ||
+        (yb.bits & 0x7fffffffu) > wb.bits ||
+        (zb.bits & 0x7fffffffu) > wb.bits) {
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(w)) {
+            v->clip_flags = GE_CLIP_INVALID | GE_CLIP_OUTSIDE_SCREEN;
+            return 0;
+        }
 
-    v->inv_w = 1.0f / v->clip_w;
-    v->x = v->clip_x * v->inv_w * sx + ox -
-        (float)(commands[GE_OFFSETX] & 0xffff) * (1.0f / 16.0f);
-    v->y = v->clip_y * v->inv_w * sy + oy -
-        (float)(commands[GE_OFFSETY] & 0xffff) * (1.0f / 16.0f);
-    v->z = v->clip_z * v->inv_w * sz + oz;
+        v->clip_flags = (unsigned)(x + w < 0.0f) |
+            ((unsigned)(w - x < 0.0f) << 1) |
+            ((unsigned)(y + w < 0.0f) << 2) |
+            ((unsigned)(w - y < 0.0f) << 3) |
+            ((unsigned)(z + w < 0.0f) << 4) |
+            ((unsigned)(w - z < 0.0f) << 5);
+        if (w <= 0.0f)
+            v->clip_flags |= GE_CLIP_NONPOSITIVE_W;
+        if (fabsf(w) < 0.0000001f) {
+            v->clip_flags |= GE_CLIP_OUTSIDE_SCREEN;
+            return 0;
+        }
+    }
+
+    v->inv_w = 1.0f / w;
+    v->x = x * v->inv_w * ge_viewport[0] + ge_viewport[3] - ge_offset[0];
+    v->y = y * v->inv_w * ge_viewport[1] + ge_viewport[4] - ge_offset[1];
+    v->z = z * v->inv_w * ge_viewport[2] + ge_viewport[5];
+    if (v->z < 0.0f)
+        v->clip_flags |= GE_CLIP_DEPTH_CLAMP | GE_CLIP_DEPTH_DISCARD;
+    else if (v->z > 65535.0f) {
+        v->clip_flags |= GE_CLIP_DEPTH_CLAMP;
+        if (v->z >= 65536.0f)
+            v->clip_flags |= GE_CLIP_DEPTH_DISCARD;
+    }
+
+    float screen_x = v->x + ge_offset[0];
+    float screen_y = v->y + ge_offset[1];
+    if (screen_x >= 0.0f && screen_x < 4096.0f && screen_y >= 0.0f && screen_y < 4096.0f)
+        return 1;
+
+    v->clip_flags |= GE_CLIP_OUTSIDE_SCREEN;
 
     return v->x > -10000.0f && v->x < 10000.0f &&
         v->y > -10000.0f && v->y < 10000.0f;
 }
 
-void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands,
+void ge3d_transform_vertex(GeVertex *v, u32 type,
     const float *weights, int weight_count)
 {
-    float x, y, z, wx, wy, wz, vx, vy, vz;
+    float x, y, z;
 
     if (type & (1u << 23)) {
         v->clip_x = v->x;
@@ -234,6 +242,7 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands,
         v->clip_z = v->z;
         v->clip_w = 1.0f;
         v->inv_w = 1.0f;
+        v->clip_flags = 0;
         return;
     }
 
@@ -273,28 +282,15 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands,
         z = sz;
     }
 
-    wx = x * ge_world[0] + y * ge_world[3] + z * ge_world[6] + ge_world[9];
-    wy = x * ge_world[1] + y * ge_world[4] + z * ge_world[7] + ge_world[10];
-    wz = x * ge_world[2] + y * ge_world[5] + z * ge_world[8] + ge_world[11];
+    if (ge_clip_matrix_dirty)
+        ge3d_update_clip_matrix();
 
-    vx = wx * ge_view[0] + wy * ge_view[3] + wz * ge_view[6] + ge_view[9];
-    vy = wx * ge_view[1] + wy * ge_view[4] + wz * ge_view[7] + ge_view[10];
-    vz = wx * ge_view[2] + wy * ge_view[5] + wz * ge_view[8] + ge_view[11];
-
-    v->clip_x = vx * ge_projection[0] + vy * ge_projection[4] + vz * ge_projection[8] + ge_projection[12];
-    v->clip_y = vx * ge_projection[1] + vy * ge_projection[5] + vz * ge_projection[9] + ge_projection[13];
-    v->clip_z = vx * ge_projection[2] + vy * ge_projection[6] + vz * ge_projection[10] + ge_projection[14];
-    v->clip_w = vx * ge_projection[3] + vy * ge_projection[7] + vz * ge_projection[11] + ge_projection[15];
+    v->clip_x = x * ge_clip_matrix[0] + y * ge_clip_matrix[4] + z * ge_clip_matrix[8] + ge_clip_matrix[12];
+    v->clip_y = x * ge_clip_matrix[1] + y * ge_clip_matrix[5] + z * ge_clip_matrix[9] + ge_clip_matrix[13];
+    v->clip_z = x * ge_clip_matrix[2] + y * ge_clip_matrix[6] + z * ge_clip_matrix[10] + ge_clip_matrix[14];
+    v->clip_w = x * ge_clip_matrix[3] + y * ge_clip_matrix[7] + z * ge_clip_matrix[11] + ge_clip_matrix[15];
 
     if ((type & 3) != 0) {
-        float tu = ge3d_float(commands[GE_TEXSCALEU]);
-        float tv = ge3d_float(commands[GE_TEXSCALEV]);
-
-        if (!tu)
-            tu = 1.0f;
-        if (!tv)
-            tv = 1.0f;
-
         if ((type & 3) == 1) {
             v->u *= 1.0f / 128.0f;
             v->v *= 1.0f / 128.0f;
@@ -303,13 +299,11 @@ void ge3d_transform_vertex(GeVertex *v, u32 type, const u32 *commands,
             v->v *= 1.0f / 32768.0f;
         }
 
-        v->u = v->u * tu + ge3d_float(commands[GE_TEXOFFSETU]);
-        v->v = v->v * tv + ge3d_float(commands[GE_TEXOFFSETV]);
-        v->u *= (float)(1 << (commands[GE_TEXSIZE0] & 0xf));
-        v->v *= (float)(1 << ((commands[GE_TEXSIZE0] >> 8) & 0xf));
+        v->u = (v->u * ge_texture_transform[0] + ge_texture_transform[2]) * ge_texture_size[0];
+        v->v = (v->v * ge_texture_transform[1] + ge_texture_transform[3]) * ge_texture_size[1];
     }
 
-    if (!ge3d_project_vertex(v, commands)) {
+    if (!ge3d_project_vertex(v)) {
         v->x = -100000.0f;
         v->y = -100000.0f;
     }

@@ -135,6 +135,8 @@ typedef struct {
     u32 type;
     u32 material;
     int index_type;
+    int indices_synchronized;
+    int vertices_synchronized;
 } GeVertexReader;
 
 typedef struct {
@@ -333,7 +335,7 @@ u32 read_frame_pixel(const void *buffer, int index, int format);
 void write_frame_pixel(void *buffer, int index, int format, u32 color);
 int compare_alpha(int function, int value, int reference);
 u32 blend_color(u32 source, u32 destination);
-void load_clut(u32 argument);
+int load_clut(u32 argument);
 u32 palette_revision(void);
 u32 palette_color(u32 index);
 u32 texture_pixel(int x, int y);
@@ -368,15 +370,19 @@ static inline int pixel_offset(int x, int y, int row_bytes, int bytes, int swizz
 }
 
 void ge_vertex_reader_init(GeVertexReader *reader, u32 type);
-GeVertex read_vertex(const GeVertexReader *reader, int number);
+void read_vertex(const GeVertexReader *reader, int number, GeVertex *vertex);
 void draw_primitive(u32 argument);
 int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int right, int bottom);
+extern unsigned ge_hardware_config_dirty;
 int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c,
     int top, int bottom);
+int ge_hardware_strip(const GeVertex *vertices, unsigned count, int top, int bottom);
 void ge_hardware_flush(void);
+void ge_hardware_invalidate_surfaces(void);
 void ge_hardware_read(const void *source, unsigned size);
 void ge_hardware_cpu_write(void);
 void ge_hardware_texture_dirty(void);
+void ge_hardware_texture_unbind(void);
 
 GeList *find_list(int id);
 void execute_list(GeList *list);

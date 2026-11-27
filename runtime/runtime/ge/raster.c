@@ -800,7 +800,7 @@ static int draw_rgba8888_sprite(
 static int draw_indexed_sprite_5551(
     GeVertex first, GeVertex second, int left, int top, int right, int bottom);
 
-static void draw_sprite(GeVertex first, GeVertex second)
+static void __attribute__((noinline)) draw_sprite(GeVertex first, GeVertex second)
 {
     if (first.x <= -99999.0f || first.y <= -99999.0f ||
         second.x <= -99999.0f || second.y <= -99999.0f)
@@ -2360,34 +2360,30 @@ next_row:
 
 static void draw_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c, float area)
 {
-    int left = (int)a->x;
-    int top = (int)a->y;
-    int right = (int)a->x;
-    int bottom = (int)a->y;
+    int ax = (int)a->x;
+    int ay = (int)a->y;
+    int bx = (int)b->x;
+    int by = (int)b->y;
+    int cx = (int)c->x;
+    int cy = (int)c->y;
+    int left = ax < bx ? ax : bx;
+    int right = ax > bx ? ax : bx;
+    int top = ay < by ? ay : by;
+    int bottom = ay > by ? ay : by;
+    if (cx < left)
+        left = cx;
+    if (cx > right)
+        right = cx;
+    if (cy < top)
+        top = cy;
+    if (cy > bottom)
+        bottom = cy;
 
     int frame_width = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
     int scissor_left = ge_state.command[GE_SCISSOR1] & 0x3ff;
     int scissor_top = (ge_state.command[GE_SCISSOR1] >> 10) & 0x3ff;
     int scissor_right = ge_state.command[GE_SCISSOR2] & 0x3ff;
     int scissor_bottom = (ge_state.command[GE_SCISSOR2] >> 10) & 0x3ff;
-
-    if (b->x < left)
-        left = (int)b->x;
-    if (c->x < left)
-        left = (int)c->x;
-    if (b->y < top)
-        top = (int)b->y;
-    if (c->y < top)
-        top = (int)c->y;
-
-    if (b->x > right)
-        right = (int)b->x;
-    if (c->x > right)
-        right = (int)c->x;
-    if (b->y > bottom)
-        bottom = (int)b->y;
-    if (c->y > bottom)
-        bottom = (int)c->y;
 
     if (!ge_state.command[GE_SCISSOR2]) {
         scissor_right = 479;
@@ -2421,21 +2417,6 @@ static void draw_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *
     draw_triangle_cpu(*a, *b, *c, area, left, top, right, bottom);
 }
 
-static unsigned clip_mask(const GeVertex *vertex)
-{
-    float x = vertex->clip_x;
-    float y = vertex->clip_y;
-    float z = vertex->clip_z;
-    float w = vertex->clip_w;
-
-    return (unsigned)(x + w < 0.0f) |
-        ((unsigned)(w - x < 0.0f) << 1) |
-        ((unsigned)(y + w < 0.0f) << 2) |
-        ((unsigned)(w - y < 0.0f) << 3) |
-        ((unsigned)(z + w < 0.0f) << 4) |
-        ((unsigned)(w - z < 0.0f) << 5);
-}
-
 static GeVertex clip_vertex(GeVertex a, GeVertex b, float t)
 {
     GeVertex out;
@@ -2463,32 +2444,36 @@ static GeVertex clip_vertex(GeVertex a, GeVertex b, float t)
     return out;
 }
 
-static void ge3d_emit_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c, int flip)
+static float triangle_area(const GeVertex *a, const GeVertex *b, const GeVertex *c)
 {
-    if (a->x <= -99999.0f || a->y <= -99999.0f ||
+    return (c->x - a->x) * (b->y - a->y) - (c->y - a->y) * (b->x - a->x);
+}
+
+static int triangle_cull(void)
+{
+    if (!(ge_state.command[0x1d] & 1u) || (ge_state.command[GE_CLEARMODE] & 1u))
+        return -1;
+
+    return !(ge_state.command[0x9b] & 1u);
+}
+
+static void ge3d_emit_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c,
+    int flip, int through)
+{
+    if (through && (a->x <= -99999.0f || a->y <= -99999.0f ||
         b->x <= -99999.0f || b->y <= -99999.0f ||
-        c->x <= -99999.0f || c->y <= -99999.0f)
+        c->x <= -99999.0f || c->y <= -99999.0f))
         return;
 
-    float area = (c->x - a->x) * (b->y - a->y) - (c->y - a->y) * (b->x - a->x);
+    float area = triangle_area(a, b, c);
     if (area == 0.0f)
         return;
 
-    int cull = (ge_state.command[0x1d] & 1u) &&
-        !(ge_state.command[GE_CLEARMODE] & 1u);
-    if (cull && (((area > 0.0f) ^ !!flip) != !(ge_state.command[0x9b] & 1u)))
+    int cull = triangle_cull();
+    if (cull >= 0 && ((area > 0.0f) ^ flip) != cull)
         return;
 
     draw_triangle(a, b, c, area);
-}
-
-static int ge3d_outside_screen(const GeVertex *v, float offset_x, float offset_y)
-{
-    float x = v->x + offset_x;
-    float y = v->y + offset_y;
-
-    return fabsf(v->clip_w) < 0.0000001f ||
-        !(x >= 0.0f && x < 4096.0f && y >= 0.0f && y < 4096.0f);
 }
 
 static const GeVertex *clamp_vertex_depth(const GeVertex *vertex, GeVertex *clamped)
@@ -2502,26 +2487,12 @@ static const GeVertex *clamp_vertex_depth(const GeVertex *vertex, GeVertex *clam
     return vertex;
 }
 
-static void draw_projected_triangle(
-    const GeVertex *a, const GeVertex *b, const GeVertex *c, int clipping_enabled, int flip)
+static void __attribute__((noinline)) draw_depth_clamped_triangle(
+    const GeVertex *a, const GeVertex *b, const GeVertex *c, int flip)
 {
-    const u32 *commands = ge_state.command;
-    float offset_x = (float)(commands[GE_OFFSETX] & 0xffffu) * (1.0f / 16.0f);
-    float offset_y = (float)(commands[GE_OFFSETY] & 0xffffu) * (1.0f / 16.0f);
-    if (ge3d_outside_screen(a, offset_x, offset_y) ||
-        ge3d_outside_screen(b, offset_x, offset_y) ||
-        ge3d_outside_screen(c, offset_x, offset_y))
-        return;
-
-    if (clipping_enabled) {
-        GeVertex clamped[3];
-        ge3d_emit_triangle(clamp_vertex_depth(a, &clamped[0]),
-            clamp_vertex_depth(b, &clamped[1]), clamp_vertex_depth(c, &clamped[2]), flip);
-    } else if (!(a->z < 0.0f || a->z >= 65536.0f ||
-                 b->z < 0.0f || b->z >= 65536.0f ||
-                 c->z < 0.0f || c->z >= 65536.0f)) {
-        ge3d_emit_triangle(a, b, c, flip);
-    }
+    GeVertex clamped[3];
+    ge3d_emit_triangle(clamp_vertex_depth(a, &clamped[0]),
+        clamp_vertex_depth(b, &clamped[1]), clamp_vertex_depth(c, &clamped[2]), flip, 0);
 }
 
 static void __attribute__((noinline)) draw_near_clipped_triangle(
@@ -2542,7 +2513,7 @@ static void __attribute__((noinline)) draw_near_clipped_triangle(
         if (current_inside != previous_inside) {
             float t = previous_distance / (previous_distance - current_distance);
             GeVertex clipped = clip_vertex(*previous, *current, t);
-            if (!ge3d_project_vertex(&clipped, ge_state.command))
+            if (!ge3d_project_vertex(&clipped))
                 return;
             polygon[count++] = clipped;
         }
@@ -2554,11 +2525,8 @@ static void __attribute__((noinline)) draw_near_clipped_triangle(
         previous_inside = current_inside;
     }
 
-    const u32 *commands = ge_state.command;
-    float offset_x = (float)(commands[GE_OFFSETX] & 0xffffu) * (1.0f / 16.0f);
-    float offset_y = (float)(commands[GE_OFFSETY] & 0xffffu) * (1.0f / 16.0f);
     for (int i = 0; i < count; i++) {
-        if (ge3d_outside_screen(&polygon[i], offset_x, offset_y))
+        if (polygon[i].clip_flags & GE_CLIP_OUTSIDE_SCREEN)
             return;
 
         if (polygon[i].z < 0.0f)
@@ -2568,42 +2536,40 @@ static void __attribute__((noinline)) draw_near_clipped_triangle(
     }
 
     for (int i = 1; i + 1 < count; i++)
-        ge3d_emit_triangle(&polygon[0], &polygon[i], &polygon[i + 1], flip);
-}
-
-static int finite_clip_position(const GeVertex *vertex)
-{
-    return isfinite(vertex->clip_x) && isfinite(vertex->clip_y) &&
-        isfinite(vertex->clip_z) && isfinite(vertex->clip_w);
+        ge3d_emit_triangle(&polygon[0], &polygon[i], &polygon[i + 1], flip, 0);
 }
 
 static void __attribute__((noinline)) draw_clipped_triangle(
     const GeVertex *a, const GeVertex *b, const GeVertex *c, u32 type, int flip)
 {
     if (type & (1u << 23)) {
-        ge3d_emit_triangle(a, b, c, flip);
+        ge3d_emit_triangle(a, b, c, flip, 1);
         return;
     }
 
-    if (!finite_clip_position(a) || !finite_clip_position(b) || !finite_clip_position(c))
+    unsigned combined = a->clip_flags | b->clip_flags | c->clip_flags;
+    if (combined & GE_CLIP_INVALID)
         return;
 
-    unsigned clip_a = clip_mask(a);
-    unsigned clip_b = clip_mask(b);
-    unsigned clip_c = clip_mask(c);
-    if (clip_a & clip_b & clip_c)
+    if (combined && (a->clip_flags & b->clip_flags & c->clip_flags & GE_CLIP_PLANES))
         return;
 
     int clipping_enabled = ge_state.command[0x1c] & 1u;
-    if (!clipping_enabled && (a->clip_w <= 0.0f || b->clip_w <= 0.0f || c->clip_w <= 0.0f))
+    if (!clipping_enabled && (combined & (GE_CLIP_NONPOSITIVE_W | GE_CLIP_DEPTH_DISCARD)))
         return;
 
-    if (clipping_enabled && ((clip_a | clip_b | clip_c) & (1u << 4))) {
+    if (clipping_enabled && (combined & GE_CLIP_NEAR)) {
         draw_near_clipped_triangle(a, b, c, flip);
         return;
     }
 
-    draw_projected_triangle(a, b, c, clipping_enabled, flip);
+    if (combined & GE_CLIP_OUTSIDE_SCREEN)
+        return;
+
+    if (clipping_enabled && (combined & GE_CLIP_DEPTH_CLAMP))
+        draw_depth_clamped_triangle(a, b, c, flip);
+    else
+        ge3d_emit_triangle(a, b, c, flip, 0);
 }
 
 static int vertex_range_overlaps(const u8 *vertices, unsigned size,
@@ -2618,32 +2584,101 @@ static int vertex_range_overlaps(const u8 *vertices, unsigned size,
         target_start - vertex_start < size;
 }
 
-static int can_reuse_strip_vertices(const GeVertexReader *reader, int count)
+static void synchronize_vertex_reader(GeVertexReader *reader, int count)
 {
-    const u8 *vertices = reader->vertices;
-    if (!vertices)
-        return 0;
+    if (!reader->vertices)
+        return;
 
     const u8 *frame = ge_pointer(buffer_address(GE_VADDR_BASE, GE_VADDR_WIDTH));
     const u8 *depth = ge_pointer(buffer_address(GE_DEPTHBUF_BASE, GE_DEPTHBUF_WIDTH));
     unsigned width = ge_state.command[GE_VADDR_WIDTH] & 0x7fc;
     unsigned depth_width = ge_state.command[GE_DEPTHBUF_WIDTH] & 0x7fc;
-    unsigned size = (unsigned)count * reader->layout.stride;
-    return !vertex_range_overlaps(vertices, size, frame, 512 * width * 4) &&
-        !vertex_range_overlaps(vertices, size, depth, (511 * depth_width + width) * 2);
+    unsigned frame_size = 512 * width * 4;
+    unsigned depth_size = (511 * depth_width + width) * 2;
+    unsigned vertices = count;
+
+    if (reader->indices) {
+        unsigned index_size = count << (reader->index_type - 1);
+        if (vertex_range_overlaps(reader->indices, index_size, frame, frame_size) ||
+            vertex_range_overlaps(reader->indices, index_size, depth, depth_size))
+            return;
+
+        ge_hardware_read(reader->indices, index_size);
+        reader->indices_synchronized = 1;
+        vertices = reader->index_type == 1 ? 256 : 65536;
+    } else if (reader->index_type) {
+        return;
+    }
+
+    unsigned vertex_size = vertices * reader->layout.stride;
+    if (!vertex_range_overlaps(reader->vertices, vertex_size, frame, frame_size) &&
+        !vertex_range_overlaps(reader->vertices, vertex_size, depth, depth_size)) {
+        ge_hardware_read(reader->vertices, vertex_size);
+        reader->vertices_synchronized = 1;
+    }
+}
+
+static int draw_unclipped_strip(const GeVertex *vertices, unsigned count)
+{
+    int cull = triangle_cull();
+    for (unsigned i = 0; i < count; i++) {
+        if (vertices[i].clip_flags)
+            return 0;
+
+        if (i >= 2) {
+            float area = triangle_area(&vertices[i - 2], &vertices[i - 1], &vertices[i]);
+            if (area == 0.0f || (cull >= 0 && ((area > 0.0f) ^ (int)(i & 1)) != cull))
+                return 0;
+        }
+    }
+
+    float top = vertices[0].y;
+    float bottom = top;
+    for (unsigned i = 1; i < count; i++) {
+        float y = vertices[i].y;
+        if (y < top)
+            top = y;
+        if (y > bottom)
+            bottom = y;
+    }
+
+    int min_y = (int)top;
+    int max_y = (int)bottom;
+    int scissor_top = (ge_state.command[GE_SCISSOR1] >> 10) & 0x3ff;
+    u32 scissor_end = ge_state.command[GE_SCISSOR2];
+    int scissor_bottom = scissor_end ? (scissor_end >> 10) & 0x3ff : 271;
+    if (min_y < scissor_top)
+        min_y = scissor_top;
+    if (max_y > scissor_bottom)
+        max_y = scissor_bottom;
+
+    return min_y <= max_y && ge_hardware_strip(vertices, count, min_y, max_y + 1);
+}
+
+static void draw_short_strip(const GeVertexReader *reader, int count)
+{
+    GeVertex vertices[12];
+    for (int i = 0; i < count; i++)
+        read_vertex(reader, i, &vertices[i]);
+
+    if (draw_unclipped_strip(vertices, count))
+        return;
+
+    for (int i = 2; i < count; i++)
+        draw_clipped_triangle(&vertices[i - 2], &vertices[i - 1], &vertices[i], reader->type, i & 1);
 }
 
 static void draw_reused_strip(const GeVertexReader *reader, int count)
 {
     GeVertex vertices[3];
-    vertices[0] = read_vertex(reader, 0);
-    vertices[1] = read_vertex(reader, 1);
+    read_vertex(reader, 0, &vertices[0]);
+    read_vertex(reader, 1, &vertices[1]);
     GeVertex *a = &vertices[0];
     GeVertex *b = &vertices[1];
     GeVertex *c = &vertices[2];
 
     for (int index = 2; index < count; index++) {
-        *c = read_vertex(reader, index);
+        read_vertex(reader, index, c);
         draw_clipped_triangle(a, b, c, reader->type, index & 1);
 
         GeVertex *previous = a;
@@ -2665,35 +2700,45 @@ void draw_primitive(u32 argument)
         return;
 
     ge_vertex_reader_init(&reader, type);
+    if (count >= 3 && primitive >= 3 && primitive <= 5)
+        synchronize_vertex_reader(&reader, count);
+
     if (primitive == 6) {
-        for (index = 0; index + 1 < count; index += 2)
-            draw_sprite(
-                read_vertex(&reader, index),
-                read_vertex(&reader, index + 1)
-            );
+        for (index = 0; index + 1 < count; index += 2) {
+            GeVertex first, second;
+            read_vertex(&reader, index + 1, &second);
+            read_vertex(&reader, index, &first);
+            draw_sprite(first, second);
+        }
     } else if (primitive == 3) {
         for (index = 0; index + 2 < count; index += 3) {
-            GeVertex a = read_vertex(&reader, index);
-            GeVertex b = read_vertex(&reader, index + 1);
-            GeVertex c = read_vertex(&reader, index + 2);
+            GeVertex a, b, c;
+            read_vertex(&reader, index, &a);
+            read_vertex(&reader, index + 1, &b);
+            read_vertex(&reader, index + 2, &c);
             draw_clipped_triangle(&a, &b, &c, type, 0);
         }
-    } else if (primitive == 4 && count > 3 && !reader.index_type &&
-        can_reuse_strip_vertices(&reader, count)) {
-        draw_reused_strip(&reader, count);
+    } else if (primitive == 4 && count >= 3 && reader.vertices_synchronized) {
+        if (type == 0x1bf && count >= 4 && count <= 12)
+            draw_short_strip(&reader, count);
+        else
+            draw_reused_strip(&reader, count);
     } else if (primitive == 4) {
         for (index = 0; index + 2 < count; index++) {
-            GeVertex a = read_vertex(&reader, index);
-            GeVertex b = read_vertex(&reader, index + 1);
-            GeVertex c = read_vertex(&reader, index + 2);
+            GeVertex a, b, c;
+            read_vertex(&reader, index, &a);
+            read_vertex(&reader, index + 1, &b);
+            read_vertex(&reader, index + 2, &c);
             draw_clipped_triangle(&a, &b, &c, type, index & 1);
         }
     } else if (primitive == 5) {
-        GeVertex first = read_vertex(&reader, 0);
+        GeVertex first;
+        read_vertex(&reader, 0, &first);
 
         for (index = 1; index + 1 < count; index++) {
-            GeVertex b = read_vertex(&reader, index);
-            GeVertex c = read_vertex(&reader, index + 1);
+            GeVertex b, c;
+            read_vertex(&reader, index, &b);
+            read_vertex(&reader, index + 1, &c);
             draw_clipped_triangle(&first, &b, &c, type, 0);
         }
     }

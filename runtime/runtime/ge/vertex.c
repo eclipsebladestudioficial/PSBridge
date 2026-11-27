@@ -3,6 +3,36 @@
 
 #include "ge_internal.h"
 
+enum {
+    GE_VERTEX_FLOAT_UV_RGBA8888_BYTE_NORMAL_FLOAT_POSITION = 0x0001bf,
+    GE_VERTEX_INDEXED_THROUGH_FLOAT = 0x80119f,
+    GE_VERTEX_FLOAT_POSITION = 0x180,
+    GE_VERTEX_U16_UV = 2,
+    GE_VERTEX_BYTE_NORMAL = 1 << 5,
+    GE_VERTEX_BYTE_WEIGHTS = 1 << 9,
+    GE_VERTEX_WEIGHT_COUNT = 7 << 14,
+};
+
+typedef struct {
+    u32 type;
+    VertexLayout layout;
+} GeVertexLayoutEntry;
+
+typedef struct {
+    u32 uv[2];
+    u32 position[3];
+} GeVertexSource;
+
+typedef struct {
+    u32 generation;
+    GeVertexSource source;
+    GeVertex vertex;
+} GeVertexCacheEntry;
+
+static GeVertexCacheEntry vertex_cache[512];
+static u32 vertex_generation = 1;
+static u32 transform_revision;
+
 static int align_value(int value, int alignment)
 {
     if (alignment <= 1)
@@ -85,13 +115,35 @@ static VertexLayout vertex_layout(u32 type)
 
 void ge_vertex_reader_init(GeVertexReader *reader, u32 type)
 {
-    reader->layout = vertex_layout(type);
+    static GeVertexLayoutEntry layouts[32];
+    unsigned slot = (type ^ (type >> 5) ^ (type >> 12)) & 31;
+    GeVertexLayoutEntry *entry = &layouts[slot];
+
+    if (!entry->layout.stride || entry->type != type) {
+        entry->type = type;
+        entry->layout = vertex_layout(type);
+    }
+
+    reader->layout = entry->layout;
     reader->vertices = ge_pointer(ge_state.vertex_address);
     reader->type = type;
     reader->material = ge_state.command[GE_MATERIALAMBIENT] |
         ((ge_state.command[GE_MATERIALALPHA] & 0xff) << 24);
     reader->index_type = (type >> 11) & 3;
     reader->indices = reader->index_type ? ge_pointer(ge_state.index_address) : NULL;
+    reader->indices_synchronized = 0;
+    reader->vertices_synchronized = 0;
+
+    if (type == GE_VERTEX_FLOAT_UV_RGBA8888_BYTE_NORMAL_FLOAT_POSITION) {
+        u32 revision = ge3d_transform_revision();
+        if (revision != transform_revision) {
+            transform_revision = revision;
+            if (!++vertex_generation) {
+                memset(vertex_cache, 0, sizeof(vertex_cache));
+                vertex_generation = 1;
+            }
+        }
+    }
 }
 
 static u32 vertex_index(const GeVertexReader *reader, int number)
@@ -102,7 +154,8 @@ static u32 vertex_index(const GeVertexReader *reader, int number)
     int index_type = reader->index_type;
     unsigned index_size = 1u << (index_type - 1);
     const u8 *entry = reader->indices + (unsigned)number * index_size;
-    ge_hardware_read(entry, index_size);
+    if (!reader->indices_synchronized)
+        ge_hardware_read(entry, index_size);
     if (index_type == 1)
         return *entry;
 
@@ -237,8 +290,70 @@ static GeVertex read_single_vertex(const u8 *data, u32 type, const VertexLayout 
     for (int i = 0; i < weight_count; i++)
         weights[i] = vertex_weight(data, layout->weight, weight_type, i);
 
-    ge3d_transform_vertex(&vertex, type, ge_state.command, weights, weight_count);
+    ge3d_transform_vertex(&vertex, type, weights, weight_count);
     return vertex;
+}
+
+static void read_through_float_vertex(const u8 *data, GeVertex *vertex)
+{
+    float uv[2];
+    float position[3];
+    u32 color;
+
+    if (((uintptr_t)data & 3) == 0)
+        data = __builtin_assume_aligned(data, 4);
+
+    memcpy(uv, data, sizeof(uv));
+    memcpy(&color, data + 8, sizeof(color));
+    memcpy(position, data + 12, sizeof(position));
+
+    ge_state.texture_u = 0.0f + uv[0];
+    ge_state.texture_v = 0.0f + uv[1];
+    float x = 0.0f + position[0];
+    float y = 0.0f + position[1];
+    float z = 0.0f + position[2];
+
+    *vertex = (GeVertex){
+        .x = x, .y = y, .z = z,
+        .u = ge_state.texture_u, .v = ge_state.texture_v,
+        .color = color,
+        .clip_x = x, .clip_y = y, .clip_z = z, .clip_w = 1.0f, .inv_w = 1.0f,
+    };
+}
+
+static void read_float_position(const u8 *data, const GeVertexReader *reader, GeVertex *vertex)
+{
+    const VertexLayout *layout = &reader->layout;
+    u32 type = reader->type;
+    float position[3];
+
+    if (((uintptr_t)data & 3) == 0)
+        data = __builtin_assume_aligned(data, 4);
+
+    memcpy(position, data + layout->position, sizeof(position));
+    if (type & GE_VERTEX_U16_UV) {
+        u16 uv[2];
+        memcpy(uv, data + layout->texture, sizeof(uv));
+        ge_state.texture_u = (float)uv[0];
+        ge_state.texture_v = (float)uv[1];
+    }
+
+    *vertex = (GeVertex){
+        .x = 0.0f + position[0], .y = 0.0f + position[1], .z = 0.0f + position[2],
+        .u = ge_state.texture_u, .v = ge_state.texture_v,
+        .color = vertex_primary_color(reader->material, reader->material, type),
+    };
+
+    float weights[8];
+    int weight_count = 0;
+    if (type & GE_VERTEX_BYTE_WEIGHTS) {
+        weight_count = ((type >> 14) & 7) + 1;
+        const u8 *source = data + layout->weight;
+        for (int i = 0; i < weight_count; i++)
+            weights[i] = (float)source[i] * (1.0f / 128.0f);
+    }
+
+    ge3d_transform_vertex(vertex, type, weights, weight_count);
 }
 
 static __attribute__((noinline)) GeVertex read_morphed_vertex(
@@ -314,12 +429,64 @@ static __attribute__((noinline)) GeVertex read_morphed_vertex(
         ge_state.texture_v = vertex.v;
     }
 
-    ge3d_transform_vertex(&vertex, type, ge_state.command, weights, weight_count);
+    ge3d_transform_vertex(&vertex, type, weights, weight_count);
 
     return vertex;
 }
 
-GeVertex read_vertex(const GeVertexReader *reader, int number)
+static void read_float_vertex(const u8 *data, const VertexLayout *layout,
+    u32 material, GeVertex *vertex)
+{
+    GeVertexSource source;
+    u32 color;
+    if (((uintptr_t)data & 3) == 0) {
+        const u8 *aligned = __builtin_assume_aligned(data, 4);
+        memcpy(source.uv, aligned, sizeof(source.uv));
+        memcpy(source.position, aligned + 16, sizeof(source.position));
+        memcpy(&color, aligned + 8, sizeof(color));
+    } else {
+        memcpy(source.uv, data + layout->texture, sizeof(source.uv));
+        memcpy(source.position, data + layout->position, sizeof(source.position));
+        memcpy(&color, data + layout->color, sizeof(color));
+    }
+    color = vertex_primary_color(color, material, GE_VERTEX_FLOAT_UV_RGBA8888_BYTE_NORMAL_FLOAT_POSITION);
+
+    float u;
+    float v;
+    memcpy(&u, &source.uv[0], sizeof(u));
+    memcpy(&v, &source.uv[1], sizeof(v));
+    ge_state.texture_u = 0.0f + u;
+    ge_state.texture_v = 0.0f + v;
+
+    u32 hash = source.position[0] ^ (source.position[1] + 3 * source.position[2]) ^
+        (source.uv[0] + 7 * source.uv[1]);
+    hash ^= hash >> 18;
+    hash ^= hash >> 9;
+    GeVertexCacheEntry *entry = &vertex_cache[hash & 511];
+    const GeVertexSource *cached = &entry->source;
+    if (entry->generation == vertex_generation &&
+        cached->position[0] == source.position[0] && cached->position[1] == source.position[1] &&
+        cached->position[2] == source.position[2] && cached->uv[0] == source.uv[0] &&
+        cached->uv[1] == source.uv[1]) {
+        *vertex = entry->vertex;
+        vertex->color = color;
+        return;
+    }
+
+    float position[3];
+    memcpy(position, source.position, sizeof(position));
+    *vertex = (GeVertex){
+        .x = 0.0f + position[0], .y = 0.0f + position[1], .z = 0.0f + position[2],
+        .u = ge_state.texture_u, .v = ge_state.texture_v,
+        .color = color,
+    };
+    ge3d_transform_vertex(vertex, GE_VERTEX_FLOAT_UV_RGBA8888_BYTE_NORMAL_FLOAT_POSITION, NULL, 0);
+    entry->generation = vertex_generation;
+    entry->source = source;
+    entry->vertex = *vertex;
+}
+
+void read_vertex(const GeVertexReader *reader, int number, GeVertex *vertex)
 {
     u32 index = vertex_index(reader, number);
     const u8 *data = reader->vertices;
@@ -327,14 +494,25 @@ GeVertex read_vertex(const GeVertexReader *reader, int number)
     u32 type = reader->type;
     u32 material = reader->material;
 
-    if (!data || layout->stride <= 0 || layout->target_stride <= 0)
-        return (GeVertex){ .color = material };
+    if (!data || layout->stride <= 0 || layout->target_stride <= 0) {
+        *vertex = (GeVertex){ .color = material, .clip_flags = GE_CLIP_OUTSIDE_SCREEN };
+        return;
+    }
 
     data += index * (u32)layout->stride;
-    ge_hardware_read(data, layout->stride);
+    if (!reader->vertices_synchronized)
+        ge_hardware_read(data, layout->stride);
 
-    if (!(type & (7u << 18)))
-        return read_single_vertex(data, type, layout, material);
-
-    return read_morphed_vertex(data, type, layout, material);
+    if (type == GE_VERTEX_FLOAT_UV_RGBA8888_BYTE_NORMAL_FLOAT_POSITION) {
+        read_float_vertex(data, layout, material, vertex);
+    } else if (type == GE_VERTEX_INDEXED_THROUGH_FLOAT) {
+        read_through_float_vertex(data, vertex);
+    } else if ((type & ~(GE_VERTEX_U16_UV | GE_VERTEX_BYTE_NORMAL |
+        GE_VERTEX_BYTE_WEIGHTS | GE_VERTEX_WEIGHT_COUNT)) == GE_VERTEX_FLOAT_POSITION) {
+        read_float_position(data, reader, vertex);
+    } else if (!(type & (7u << 18))) {
+        *vertex = read_single_vertex(data, type, layout, material);
+    } else {
+        *vertex = read_morphed_vertex(data, type, layout, material);
+    }
 }

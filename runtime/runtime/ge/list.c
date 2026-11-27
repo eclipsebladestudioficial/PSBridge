@@ -2,6 +2,42 @@
 
 #include "ge_internal.h"
 
+enum {
+    GE_COMMAND_SPAN_BYTES = 256,
+    GE_COMMAND_DRAW_CONFIG = 1,
+    GE_COMMAND_TEXTURE_KEY = 2,
+    GE_COMMAND_TRANSFORM = 4,
+};
+
+static const u8 command_flags[256] = {
+    [0x2a ... GE_OFFSETY] = GE_COMMAND_TRANSFORM,
+    [GE_VADDR_BASE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_VADDR_WIDTH] = GE_COMMAND_DRAW_CONFIG,
+    [GE_FRAMEBUF_FORMAT] = GE_COMMAND_DRAW_CONFIG,
+    [GE_DEPTHBUF_BASE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_DEPTHBUF_WIDTH] = GE_COMMAND_DRAW_CONFIG,
+    [GE_DEPTHTEST] = GE_COMMAND_DRAW_CONFIG,
+    [GE_DEPTH_TEST_ENABLE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_DEPTH_WRITE_DISABLE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_ALPHA_TEST_ENABLE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_ALPHATEST] = GE_COMMAND_DRAW_CONFIG,
+    [GE_BLEND_ENABLE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_BLENDMODE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_BLENDFIXEDB] = GE_COMMAND_DRAW_CONFIG,
+    [GE_TEXTURE_ENABLE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_TEXFORMAT] = GE_COMMAND_DRAW_CONFIG | GE_COMMAND_TEXTURE_KEY,
+    [GE_TEXFUNC] = GE_COMMAND_DRAW_CONFIG | GE_COMMAND_TEXTURE_KEY,
+    [GE_SCISSOR1] = GE_COMMAND_DRAW_CONFIG,
+    [GE_SCISSOR2] = GE_COMMAND_DRAW_CONFIG,
+    [GE_CLEARMODE] = GE_COMMAND_DRAW_CONFIG,
+    [GE_TEXADDR0] = GE_COMMAND_TEXTURE_KEY,
+    [GE_TEXBUFWIDTH0] = GE_COMMAND_TEXTURE_KEY,
+    [GE_TEXSIZE0] = GE_COMMAND_TEXTURE_KEY | GE_COMMAND_TRANSFORM,
+    [GE_TEXMODE] = GE_COMMAND_TEXTURE_KEY,
+    [GE_CLUTFORMAT] = GE_COMMAND_TEXTURE_KEY,
+    [GE_TEXENVCOLOR] = GE_COMMAND_TEXTURE_KEY,
+};
+
 static int next_list_id = 1;
 static int next_callback_id = 1;
 static GeCallback ge_callbacks[16];
@@ -143,6 +179,8 @@ GeList *find_list(int id)
 void execute_list(GeList *list)
 {
     int commands = 0;
+    const u32 *ram_commands = NULL;
+    u32 ram_start = 0;
 
     psbridge_graphics_lock();
     if (list->done) {
@@ -150,11 +188,11 @@ void execute_list(GeList *list)
         return;
     }
 
+    ge_hardware_invalidate_surfaces();
     ge_hardware_texture_dirty();
     ge_dxt_new_list();
 
     while (!list->done && commands++ < GE_COMMAND_LIMIT) {
-        const u32 *instruction;
         u32 word;
         u32 command;
         u32 argument;
@@ -167,29 +205,52 @@ void execute_list(GeList *list)
             break;
         }
 
-        instruction = ge_pointer(list->pc);
-
-        if (!instruction) {
-            list->done = 1;
-            break;
+        u32 pc = list->pc & 0x3fffffffu;
+        unsigned offset = pc - ram_start;
+        if (!ram_commands || offset >= GE_COMMAND_SPAN_BYTES) {
+            ram_commands = NULL;
+            if (pc >= 0x08800000u && pc <= 0x0a000000u - GE_COMMAND_SPAN_BYTES) {
+                ram_commands = psbridge_ram_pointer(pc, GE_COMMAND_SPAN_BYTES);
+                ram_start = pc;
+                offset = 0;
+            }
         }
 
-        ge_hardware_read(instruction, sizeof(*instruction));
-        word = *instruction;
+        if (ram_commands) {
+            word = ram_commands[offset / sizeof(u32)];
+        } else {
+            const u32 *instruction = ge_pointer(list->pc);
+            if (!instruction) {
+                list->done = 1;
+                break;
+            }
+
+            ge_hardware_read(instruction, sizeof(*instruction));
+            word = *instruction;
+        }
+
         command = word >> 24;
         argument = word & 0x00ffffff;
         list->pc += 4;
-        ge_state.command[command] = argument;
-        if (command == GE_BLENDMODE)
-            ge_blend_mode_seen = 1;
-        ge3d_command(command, argument);
+        unsigned flags = command_flags[command];
+        if (ge_state.command[command] != argument) {
+            if (flags & GE_COMMAND_TEXTURE_KEY)
+                ge_hardware_texture_unbind();
 
-        if (command == GE_TEXFUNC || command == GE_VERTEXTYPE || command == GE_TEXFORMAT) {
+            ge_hardware_config_dirty |= flags & GE_COMMAND_DRAW_CONFIG;
+            ge_state.command[command] = argument;
+        }
+        if (flags & GE_COMMAND_TRANSFORM)
+            ge3d_command(command, argument);
+
+        switch (command) {
+        case GE_TEXFUNC:
+        case GE_VERTEXTYPE:
+        case GE_TEXFORMAT: {
             static int ge_rgb01_logs = 0;
 
             if (ge_rgb01_logs < 18) {
                 ge_rgb01_logs++;
-
                 PSB_LOG(
                     GE,
                     "ge recebeu uma leitada %08x com a potencia de mil homens %06x",
@@ -197,47 +258,71 @@ void execute_list(GeList *list)
                     (unsigned int)argument
                 );
             }
+            break;
         }
-
-        if (command == GE_VADDR)
+        case GE_BLENDMODE:
+            if (!ge_blend_mode_seen) {
+                ge_blend_mode_seen = 1;
+                ge_hardware_config_dirty = 1;
+            }
+            break;
+        case GE_VADDR:
             ge_state.vertex_address = relative_address(argument);
-        else if (command == GE_IADDR)
+            break;
+        case GE_IADDR:
             ge_state.index_address = relative_address(argument);
-        else if (command == GE_OFFSETADDR)
+            break;
+        case GE_OFFSETADDR:
             ge_state.offset_address = argument << 8;
-        else if (command == GE_ORIGIN)
+            break;
+        case GE_ORIGIN:
             ge_state.offset_address = list->pc - 4;
-        else if (command == GE_PRIM) {
+            break;
+        case GE_PRIM:
             list->draws++;
             draw_primitive(argument);
-        } else if (command == GE_TRANSFERSTART) {
+            break;
+        case GE_TRANSFERSTART:
             ge_hardware_texture_dirty();
             ge_hardware_cpu_write();
             transfer_pixels();
             ge_dxt_dirty();
-        } else if (command == GE_LOADCLUT) {
-            load_clut(argument);
-        } else if (command == 0xcb) {
+            break;
+        case GE_LOADCLUT:
+            if (load_clut(argument))
+                ge_hardware_texture_unbind();
+            break;
+        case 0xcb:
             ge_hardware_texture_dirty();
             ge_dxt_dirty();
-        } else if (command == GE_JUMP)
+            break;
+        case GE_JUMP:
             list->pc = relative_address(argument & 0x00fffffc);
-        else if (command == GE_CALL && list->stack_size < GE_STACK_LIMIT) {
-            list->stack[list->stack_size] = list->pc;
-            list->stack_offset[list->stack_size] = ge_state.offset_address;
-            list->stack_size++;
-            list->pc = relative_address(argument & 0x00fffffc);
-        } else if (command == GE_RET && list->stack_size > 0) {
-            list->stack_size--;
-            list->pc = list->stack[list->stack_size];
-            ge_state.offset_address = list->stack_offset[list->stack_size];
-        } else if (command == GE_SIGNAL) {
+            break;
+        case GE_CALL:
+            if (list->stack_size < GE_STACK_LIMIT) {
+                list->stack[list->stack_size] = list->pc;
+                list->stack_offset[list->stack_size] = ge_state.offset_address;
+                list->stack_size++;
+                list->pc = relative_address(argument & 0x00fffffc);
+            }
+            break;
+        case GE_RET:
+            if (list->stack_size > 0) {
+                list->stack_size--;
+                list->pc = list->stack[list->stack_size];
+                ge_state.offset_address = list->stack_offset[list->stack_size];
+            }
+            break;
+        case GE_SIGNAL:
             list->signal_id = argument & 0xffff;
             list->pending_signal = 1;
-        } else if (command == GE_FINISH) {
+            break;
+        case GE_FINISH:
             list->finish_id = argument;
             list->pending_finish = 1;
-        } else if (command == GE_END) {
+            break;
+        case GE_END: {
             ge_hardware_flush();
             list->done = 1;
             if (list->draws) {
@@ -263,6 +348,7 @@ void execute_list(GeList *list)
             if (pending_finish)
                 fire_ge_callback(callback, 1, finish);
             return;
+        }
         }
     }
 

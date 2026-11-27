@@ -201,7 +201,7 @@ u32 blend_color(u32 source, u32 destination)
     return result | (source & 0xff000000u);
 }
 
-void load_clut(u32 argument)
+int load_clut(u32 argument)
 {
     u32 bytes = (argument & 0x3f) * 32;
     u32 address =
@@ -212,12 +212,12 @@ void load_clut(u32 argument)
     if (bytes > sizeof(ge_clut))
         bytes = sizeof(ge_clut);
     if (!source || !bytes)
-        return;
+        return 0;
 
     ge_hardware_read(source, bytes);
     if (ge_clut_loaded && bytes <= ge_clut_bytes &&
         memcmp(ge_clut, source, bytes) == 0)
-        return;
+        return 0;
 
     memcpy(ge_clut, source, bytes);
     if (bytes > ge_clut_bytes)
@@ -225,6 +225,7 @@ void load_clut(u32 argument)
     ge_clut_loaded = 1;
     if (++ge_clut_revision == 0)
         ge_clut_revision++;
+    return 1;
 }
 
 u32 palette_revision(void)
