@@ -129,6 +129,15 @@ typedef struct {
 } VertexLayout;
 
 typedef struct {
+    VertexLayout layout;
+    const u8 *vertices;
+    const u8 *indices;
+    u32 type;
+    u32 material;
+    int index_type;
+} GeVertexReader;
+
+typedef struct {
     const u8 *texture;
     u32 *frame;
     u32 colors[256];
@@ -358,12 +367,12 @@ static inline int pixel_offset(int x, int y, int row_bytes, int bytes, int swizz
         (byte_x & 15);
 }
 
-VertexLayout vertex_layout(u32 type);
-GeVertex read_vertex(int number, u32 type, VertexLayout layout);
+void ge_vertex_reader_init(GeVertexReader *reader, u32 type);
+GeVertex read_vertex(const GeVertexReader *reader, int number);
 void draw_primitive(u32 argument);
 int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int right, int bottom);
 int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c,
-    int left, int top, int right, int bottom);
+    int top, int bottom);
 void ge_hardware_flush(void);
 void ge_hardware_read(const void *source, unsigned size);
 void ge_hardware_cpu_write(void);

@@ -11,7 +11,7 @@
 #define GS_GE_HEIGHT 272
 #define GS_GE_OFFSET 32768
 #define GS_GE_PACKET_SIZE 4096
-#define GS_GE_TEXTURE_BYTES (1024 * 1024)
+#define GS_GE_TEXTURE_BYTES (2560 * 1024)
 #define GS_GE_TEXTURE_ROWS 8
 
 extern u8 __psbridge_heap_start[];
@@ -97,8 +97,8 @@ typedef struct {
 } GeHardwareImage;
 
 static GeHardwareBatch batch;
-static GeHardwareTexture textures[16];
-static GeHardwareImage images[16];
+static GeHardwareTexture textures[32];
+static GeHardwareImage images[32];
 static unsigned texture_count;
 static unsigned image_count;
 static u32 texture_vram;
@@ -106,6 +106,7 @@ static unsigned texture_used;
 static u32 decoded[GS_GE_STRIDE * GS_GE_TEXTURE_ROWS] __attribute__((aligned(64)));
 static u32 depth_vram;
 static GeGifRegister packet[GS_GE_PACKET_SIZE + 1] __attribute__((aligned(64)));
+static GeGifRegister upload_chain[8] __attribute__((aligned(64)));
 
 static void send_gif(const void *data, unsigned qwc)
 {
@@ -113,38 +114,54 @@ static void send_gif(const void *data, unsigned qwc)
     dmaKit_wait(DMA_CHANNEL_GIF, 0);
 }
 
-static void gs_transfer(u32 vram, int psm, int y, int height, int tbw, int width, int download)
+static void setup_transfer(GeGifRegister *transfer, u32 vram, int psm,
+    int y, int height, int tbw, int width, int download)
 {
-    GeGifRegister transfer[] __attribute__((aligned(64))) = {
-        { 0, GIF_AD },
-        { download ? GS_SETREG_BITBLTBUF(vram / 256, tbw, psm, 0, 0, 0) :
-            GS_SETREG_BITBLTBUF(0, 0, 0, vram / 256, tbw, psm), GS_BITBLTBUF },
-        { download ? GS_SETREG_TRXPOS(0, y, 0, 0, 0) :
-            GS_SETREG_TRXPOS(0, 0, 0, y, 0), GS_TRXPOS },
-        { GS_SETREG_TRXREG(width, height), GS_TRXREG },
-        { download, GS_TRXDIR },
-    };
+    u64 tag = GIF_TAG_AD(4);
+    u64 buffer = download ? GS_SETREG_BITBLTBUF(vram / 256, tbw, psm, 0, 0, 0) :
+        GS_SETREG_BITBLTBUF(0, 0, 0, vram / 256, tbw, psm);
+    u64 position = download ? GS_SETREG_TRXPOS(0, y, 0, 0, 0) : GS_SETREG_TRXPOS(0, 0, 0, y, 0);
 
-    transfer[0].data = GIF_TAG_AD(4);
-    send_gif(transfer, sizeof(transfer) / sizeof(transfer[0]));
+    transfer[0] = (GeGifRegister){ tag, GIF_AD };
+    transfer[1] = (GeGifRegister){ buffer, GS_BITBLTBUF };
+    transfer[2] = (GeGifRegister){ position, GS_TRXPOS };
+    transfer[3] = (GeGifRegister){ GS_SETREG_TRXREG(width, height), GS_TRXREG };
+    transfer[4] = (GeGifRegister){ download, GS_TRXDIR };
 }
 
-static void upload_rows(u8 *pixels, unsigned qwc)
+static void gs_download(u32 vram, int psm, int y, int height, int tbw, int width)
 {
-    GeGifRegister chain[3] __attribute__((aligned(64))) = {
-        { DMA_TAG(1, 0, DMA_CNT, 0, 0, 0), 0 },
-        { 0, 0 },
-        { 0, 0 },
-    };
+    GeGifRegister transfer[5] __attribute__((aligned(64)));
+    setup_transfer(transfer, vram, psm, y, height, tbw, width, 1);
+    send_gif(transfer, 5);
+}
 
-    SyncDCache(pixels, pixels + qwc * 16);
+static void upload_rows(const u8 *pixels, unsigned qwc, const GeGifRegister *transfer)
+{
+    static GeGifRegister *chain;
+    if (!chain) {
+        SyncDCache(upload_chain, upload_chain + 8);
+        chain = UCAB_SEG((uintptr_t)upload_chain & 0x1fffffffu);
+    }
+
+    unsigned setup = 0;
+    if (transfer) {
+        memcpy(chain + 1, transfer, 5 * sizeof(*chain));
+        setup = 5;
+    }
+
+    SyncDCache((void *)pixels, (void *)(pixels + qwc * 16));
     while (qwc) {
         unsigned chunk = qwc > 0x7fff ? 0x7fff : qwc;
         u32 address = (uintptr_t)pixels & 0x1fffffffu;
-        chain[1].data = GIF_TAG(chunk, 1, 0, 0, GSKIT_GIF_FLG_IMAGE, 0);
-        chain[2].data = DMA_TAG(chunk, 0, DMA_REFE, 0, address, 0);
-        dmaKit_send_chain(DMA_CHANNEL_GIF, chain, 3);
+        chain[0] = (GeGifRegister){ DMA_TAG(setup + 1, 0, DMA_CNT, 0, 0, 0), 0 };
+        chain[setup + 1].data = GIF_TAG(chunk, 1, 0, 0, GSKIT_GIF_FLG_IMAGE, 0);
+        chain[setup + 1].address = 0;
+        chain[setup + 2] = (GeGifRegister){ DMA_TAG(chunk, 0, DMA_REFE, 0, address, 0), 0 };
+        __asm__ volatile("sync.l" ::: "memory");
+        dmaKit_send_chain_ucab(DMA_CHANNEL_GIF, chain);
         dmaKit_wait(DMA_CHANNEL_GIF, 0);
+        setup = 0;
         pixels += chunk * 16;
         qwc -= chunk;
     }
@@ -183,16 +200,18 @@ void ge_hardware_flush(void)
     u8 *depth = batch.depth ? batch.depth + batch.top * GS_GE_STRIDE * 2 : NULL;
     unsigned depth_qwc = rows * GS_GE_STRIDE * 2 / 16;
 
+    GeGifRegister transfer[5];
     if (!batch.replace_color) {
-        gs_transfer(batch.vram, psm, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE, 0);
-        upload_rows(pixels, qwc);
+        setup_transfer(transfer, batch.vram, psm, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE, 0);
+        upload_rows(pixels, qwc, transfer);
     } else {
         SyncDCache(pixels, pixels + qwc * 16);
     }
 
     if (depth && !batch.replace_depth) {
-        gs_transfer(depth_vram, 0x30 | GS_PSMZ_16, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE, 0);
-        upload_rows(depth, depth_qwc);
+        setup_transfer(transfer, depth_vram, 0x30 | GS_PSMZ_16, batch.top, rows,
+            GS_GE_STRIDE / 64, GS_GE_STRIDE, 0);
+        upload_rows(depth, depth_qwc, transfer);
     } else if (depth) {
         SyncDCache(depth, depth + depth_qwc * 16);
     }
@@ -206,11 +225,11 @@ void ge_hardware_flush(void)
     while (!(GS_CSR_FINISH))
         __asm__ volatile("nop");
 
-    gs_transfer(batch.vram, psm, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE, 1);
+    gs_download(batch.vram, psm, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE);
     download_rows(pixels, qwc);
 
     if (batch.depth_written) {
-        gs_transfer(depth_vram, 0x30 | GS_PSMZ_16, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE, 1);
+        gs_download(depth_vram, 0x30 | GS_PSMZ_16, batch.top, rows, GS_GE_STRIDE / 64, GS_GE_STRIDE);
         download_rows(depth, depth_qwc);
     }
     if (rows == GS_GE_HEIGHT)
@@ -413,10 +432,11 @@ static void upload_indexed_texture(
     int transfer_bytes = source_width < 16 ? 16 : source_width;
     int height = end - first;
     int aligned = !((uintptr_t)pixels & 15);
-    gs_transfer(vram, psm, first, height, tbw, transfer_bytes * indices_per_byte, 0);
+    GeGifRegister transfer[5];
+    setup_transfer(transfer, vram, psm, first, height, tbw, transfer_bytes * indices_per_byte, 0);
 
     if (!swizzled && row_bytes == transfer_bytes && source_width == transfer_bytes && aligned) {
-        upload_rows((u8 *)pixels + first * row_bytes, height * transfer_bytes / 16);
+        upload_rows(pixels + first * row_bytes, height * transfer_bytes / 16, transfer);
         return;
     }
 
@@ -444,7 +464,7 @@ static void upload_indexed_texture(
             }
         }
 
-        upload_rows((u8 *)decoded, rows * transfer_bytes / 16);
+        upload_rows((u8 *)decoded, rows * transfer_bytes / 16, y == first ? transfer : NULL);
     }
 }
 
@@ -491,6 +511,22 @@ static void ensure_image_rows(GeHardwareImage *image, float min_v, float max_v)
     }
 }
 
+static int texture_key_equal(const GeHardwareTextureKey *a, const GeHardwareTextureKey *b)
+{
+    return a->address == b->address &&
+        a->color == b->color &&
+        a->revision == b->revision &&
+        a->blend == b->blend &&
+        a->clut == b->clut &&
+        a->layout == b->layout &&
+        a->size == b->size &&
+        a->function == b->function &&
+        a->environment == b->environment &&
+        a->binary_alpha_required == b->binary_alpha_required &&
+        a->texture_function == b->texture_function &&
+        a->blend_alpha_ref == b->blend_alpha_ref;
+}
+
 static const GeHardwareTexture *load_texture(
     u32 vertex_color, GeGsBlend blend, int binary_alpha_required,
     GeGsTextureFunction texture_function, int blend_alpha_ref, float min_v, float max_v)
@@ -531,7 +567,7 @@ static const GeHardwareTexture *load_texture(
 
     for (unsigned i = texture_count; i > 0; i--) {
         const GeHardwareTexture *cached = &textures[i - 1];
-        if (!memcmp(&key, &cached->key, sizeof(key))) {
+        if (texture_key_equal(&key, &cached->key)) {
             ge_hardware_read(cached->pixels, cached->source_size);
             if (cached->image_index)
                 ensure_image_rows(&images[cached->image_index - 1], min_v, max_v);
@@ -636,6 +672,7 @@ static const GeHardwareTexture *load_texture(
     u32 free_vram = texture_vram + texture_used;
     u32 vram = image ? image->vram : free_vram;
     u32 clut = 0;
+    GeGifRegister transfer[5];
 
     if (indexed) {
         if (!image) {
@@ -648,15 +685,16 @@ static const GeHardwareTexture *load_texture(
             clut = free_vram;
         }
         ensure_image_rows(image, min_v, max_v);
-        gs_transfer(clut, GS_PSM_CT32, 0, format == 4 ? 2 : 16, 1, format == 4 ? 8 : 16, 0);
-        upload_rows((u8 *)palette, (format == 4 ? 16 : 256) * sizeof(*palette) / 16);
+        setup_transfer(transfer, clut, GS_PSM_CT32, 0, format == 4 ? 2 : 16,
+            1, format == 4 ? 8 : 16, 0);
+        upload_rows((u8 *)palette, (format == 4 ? 16 : 256) * sizeof(*palette) / 16, transfer);
     } else {
         GeDxtSampler dxt = {
             .texture = pixels, .width = width, .height = height,
             .blocks_w = row_bytes / block_bytes, .bytes = block_bytes,
             .format = format,
         };
-        gs_transfer(vram, GS_PSM_CT32, 0, height, tbw, width, 0);
+        setup_transfer(transfer, vram, GS_PSM_CT32, 0, height, tbw, width, 0);
 
         for (int y = 0; y < height; y += GS_GE_TEXTURE_ROWS) {
             int rows = height - y < GS_GE_TEXTURE_ROWS ? height - y : GS_GE_TEXTURE_ROWS;
@@ -684,7 +722,7 @@ static const GeHardwareTexture *load_texture(
                 }
             }
 
-            upload_rows((u8 *)decoded, rows * width / 4);
+            upload_rows((u8 *)decoded, rows * width / 4, y == 0 ? transfer : NULL);
         }
     }
 
@@ -705,7 +743,7 @@ static const GeHardwareTexture *load_texture(
     return entry;
 }
 
-static void draw_state(int primitive, int left, int top, int right, int bottom,
+static void draw_state(int primitive, u64 scissor,
     u32 mask, int depth_write, int depth_test, int alpha_test, int alpha_ref,
     const GeHardwareTexture *texture, GeGsBlend blend)
 {
@@ -716,7 +754,7 @@ static void draw_state(int primitive, int left, int top, int right, int bottom,
     gs_draw_reg(GE_GS_STATE_TEST, GS_TEST_2, GS_SETREG_TEST(alpha_test != 1, gs_alpha_func[alpha_test],
         alpha_ref, 0, 0, 0, 1, depth_test));
     batch.depth_written |= depth_write;
-    gs_draw_reg(GE_GS_STATE_SCISSOR, GS_SCISSOR_2, GS_SETREG_SCISSOR(left, right - 1, top, bottom - 1));
+    gs_draw_reg(GE_GS_STATE_SCISSOR, GS_SCISSOR_2, scissor);
 
     if (texture) {
         u32 wrap = ge_state.command[GE_TEXWRAP];
@@ -842,7 +880,8 @@ int ge_hardware_sprite(GeVertex first, GeVertex second, int left, int top, int r
     if (!begin_draw(top, bottom, depth, full && !mask && !texture, full && depth))
         return 0;
 
-    draw_state(6, left, top, right, bottom, mask, depth != NULL, 1,
+    u64 scissor = GS_SETREG_SCISSOR(left, right - 1, top, bottom - 1);
+    draw_state(6, scissor, mask, depth != NULL, 1,
         alpha_test, alpha_ref, texture, GE_GS_BLEND_NONE);
     second.x = left;
     second.y = top;
@@ -870,8 +909,8 @@ static int texture_coords_in_gs(const GeVertex *vertex)
         vertex->v >= -4096.0f && vertex->v <= 4096.0f;
 }
 
-int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c,
-    int left, int top, int right, int bottom)
+int __attribute__((noinline)) ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c,
+    int top, int bottom)
 {
     if (ge_state.command[GE_CLEARMODE] & 1)
         return 0;
@@ -1005,9 +1044,20 @@ int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c
     if (!begin_draw(top, bottom, depth, 0, 0))
         return 0;
 
+    u32 scissor_first = ge_state.command[GE_SCISSOR1];
+    u32 scissor_last = ge_state.command[GE_SCISSOR2];
+    unsigned right = scissor_last ? scissor_last & 0x3ff : 479;
+    unsigned lower = scissor_last ? (scissor_last >> 10) & 0x3ff : 271;
+    if (right >= GS_GE_STRIDE)
+        right = GS_GE_STRIDE - 1;
+    if (lower >= GS_GE_HEIGHT)
+        lower = GS_GE_HEIGHT - 1;
+
+    u64 scissor = GS_SETREG_SCISSOR(scissor_first & 0x3ff, right,
+        (scissor_first >> 10) & 0x3ff, lower);
     if (varying_source_alpha) {
         if ((a->color | b->color | c->color) >> 31) {
-            draw_state(3, left, top, right, bottom, 0x00ffffffu, 0, depth_test,
+            draw_state(3, scissor, 0x00ffffffu, 0, depth_test,
                 7, 128, texture, GE_GS_BLEND_NONE);
             emit_vertex(a, texture, 1);
             emit_vertex(b, texture, 1);
@@ -1018,7 +1068,7 @@ int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c
         alpha_ref >>= 1;
     } else if (texture && texture->key.texture_function == GE_GS_TEXTURE_MODULATE_RGBA &&
         (a->color | b->color | c->color) >> 31) {
-        draw_state(3, left, top, right, bottom, 0x00ffffffu, 0, depth_test,
+        draw_state(3, scissor, 0x00ffffffu, 0, depth_test,
             1, 0, texture, GE_GS_BLEND_NONE);
         emit_vertex(a, texture, 1);
         emit_vertex(b, texture, 1);
@@ -1026,7 +1076,7 @@ int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c
         mask = 0x80000000u;
     } else if (gs_blend == GE_GS_BLEND_SOURCE_ALPHA) {
         gs_reg(GS_FBA_2, 1);
-        draw_state(3, left, top, right, bottom, 0x00ffffffu, 0, depth_test,
+        draw_state(3, scissor, 0x00ffffffu, 0, depth_test,
             7, 64, texture, GE_GS_BLEND_NONE);
         emit_vertex(a, texture, 0);
         emit_vertex(b, texture, 0);
@@ -1036,7 +1086,7 @@ int ge_hardware_triangle(const GeVertex *a, const GeVertex *b, const GeVertex *c
         alpha_ref = 0;
     }
 
-    draw_state(3, left, top, right, bottom, mask, depth_write, depth_test,
+    draw_state(3, scissor, mask, depth_write, depth_test,
         alpha_test, alpha_ref, texture, gs_blend);
     emit_vertex(a, texture, 0);
     emit_vertex(b, texture, 0);
